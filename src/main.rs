@@ -92,6 +92,8 @@ enum Command {
         #[arg(long)]
         with_recovery_key: bool,
     },
+    /// Have `vault serve` write (or re-check) the current backup now, e.g. after a failure.
+    Backup,
     /// Restore a backup into a fresh vault on this Mac, with the recovery key.
     Restore { file: PathBuf },
     /// Remove this Mac's vault so a backup can be restored (needs the recovery key).
@@ -129,6 +131,7 @@ fn main() -> ExitCode {
         Command::Status => status(&paths),
         Command::Audit { all } => show_audit(&paths, all),
         Command::VerifyBackup { file, with_recovery_key } => verify_backup(&paths, file, with_recovery_key),
+        Command::Backup => backup_now(&paths),
         Command::Restore { file } => restore(&paths, &file),
         Command::Reset => reset(&paths),
         Command::InstallAgent => install_agent(&paths),
@@ -192,23 +195,20 @@ fn init(paths: &Paths, kit: Option<PathBuf>, backup_dir: Option<PathBuf>) -> Res
         None => {
             println!("The Recovery Kit holds the key that opens your backups. Print it or save it in");
             println!("your password manager, then confirm it; the vault deletes the file after that.");
+            println!("Keep the default: on the Desktop or in Documents or Downloads, macOS may first ask");
+            println!("whether Terminal may access that folder.");
             let answer = ask(&format!("Save the Recovery Kit to [{}]: ", default_kit.display()))?;
             if answer.is_empty() { default_kit } else { expand_home(paths, &answer) }
         }
     };
-    let suggested = paths.icloud_backups().unwrap_or_else(|| paths.local_backups.clone());
+    let suggested = paths.icloud_backups();
     let backup_dir = match backup_dir {
         Some(path) => path,
         None => {
             println!();
             println!("Backups are encrypted to your recovery key and written after every change.");
             println!("Keep them off this Mac's disk so a lost or stolen Mac doesn't take them along.");
-            if paths.icloud_backups().is_some() {
-                println!("Suggested: iCloud Drive (Apple stores only ciphertext; Volgenic stores nothing).");
-                println!("If Terminal hasn't used iCloud Drive before, macOS may now ask once whether");
-                println!("Terminal may access files in iCloud Drive. That is for this backup folder: click");
-                println!("Allow. It is the only dialog setup can show; the vault never uses the Keychain.");
-            }
+            println!("Suggested: iCloud Drive (Apple stores only ciphertext; Volgenic stores nothing).");
             let answer = ask(&format!("Backup folder [{}]: ", suggested.display()))?;
             if answer.is_empty() { suggested } else { expand_home(paths, &answer) }
         }
@@ -220,7 +220,26 @@ fn init(paths: &Paths, kit: Option<PathBuf>, backup_dir: Option<PathBuf>) -> Res
     println!("  Recovery Kit:     {}", report.kit_path.display());
     println!("  recovery key:     fingerprint {}", report.recovery_fingerprint);
     println!("  backups:          {}", report.backup_dir.display());
-    print_backup(&report.backup);
+    println!();
+    println!("Next the vault starts its background part, `vault serve`, and has it write the first");
+    println!("backup. Only `vault serve` ever touches the backup folder. What macOS may show:");
+    println!("  - A notification, \"Background Items Added\": a login item was added. Nothing to click.");
+    println!("  - Once, if the backup folder is in iCloud Drive (or Desktop, Documents, Downloads or");
+    println!("    an external disk): a dialog asking whether \"vault\" may access files there.");
+    println!("    Click Allow. macOS remembers it for this program's signature, which stays the same");
+    println!("    across updates, so it doesn't ask again.");
+    println!("That dialog is the only one the vault can cause. It never uses the Keychain, so no");
+    println!("Keychain or password dialog appears, now or after an update.");
+    ask("Press Return to continue. ")?;
+    install_agent(paths)?;
+    let backup = first_backup(paths)?;
+    print_backup(&backup);
+    if !backup.ok {
+        println!();
+        println!("The vault holds nothing yet, so starting over is free: `vault reset` removes this");
+        println!("unused vault without the recovery key; then run `vault init` with another folder.");
+        return Err(VaultError::BackupFailed(backup.detail));
+    }
     println!();
     println!("Next: open the kit (open -e {:?}),", report.kit_path.display().to_string());
     println!("print it or save the key in your password manager, then run");
@@ -229,9 +248,34 @@ fn init(paths: &Paths, kit: Option<PathBuf>, backup_dir: Option<PathBuf>) -> Res
     Ok(())
 }
 
+/// Waits for `serve` to answer, then has it write and verify a backup (R32).
+fn first_backup(paths: &Paths) -> Result<vault::model::BackupStatus, VaultError> {
+    if !vault::client::wait_for_serve(paths, std::time::Duration::from_secs(30)) {
+        return Err(VaultError::BackupFailed(format!(
+            "`vault serve` didn't start; its log is {}",
+            paths.log_file.display()
+        )));
+    }
+    println!("Writing the first backup (if macOS asks about file access for \"vault\", click Allow)...");
+    Vault::open(paths)?.backup()
+}
+
+/// Starts `serve` again so it loads a vault made by `restore`.
+fn restart_serve(paths: &Paths) -> Result<(), VaultError> {
+    if !paths.launch_agent.exists() {
+        return install_agent(paths);
+    }
+    let target = format!("gui/{}/com.volgenic.vault", unsafe { libc::getuid() });
+    let out = std::process::Command::new("/bin/launchctl").args(["kickstart", "-k", &target]).output()?;
+    if !out.status.success() {
+        return install_agent(paths);
+    }
+    Ok(())
+}
+
 fn print_backup(status: &vault::model::BackupStatus) {
     if status.ok {
-        println!("  backup:           generation {} written, read back and decrypted OK", status.generation);
+        println!("  backup:           generation {} OK ({}, by vault serve)", status.generation, status.detail);
         println!("                    {}", status.file);
     } else {
         println!("  backup:           FAILED: {}", status.detail);
@@ -352,6 +396,7 @@ fn status(paths: &Paths) -> Result<(), VaultError> {
     println!("  key protection:    {}", report.key_protection);
     println!("  protected key:     {}", if report.key_file { "present (key.se)" } else { "absent" });
     println!("  Keychain:          not used (no Keychain dialogs, ever)");
+    println!("  backup folder:     read and written only by vault serve");
     println!(
         "  automatic login:   {}",
         if report.auto_login_on { "ON: the vault refuses to run until it is turned off" } else { "off (required)" }
@@ -440,6 +485,22 @@ fn show_audit(paths: &Paths, all: bool) -> Result<(), VaultError> {
 }
 
 fn verify_backup(paths: &Paths, file: Option<PathBuf>, with_recovery_key: bool) -> Result<(), VaultError> {
+    if file.is_none() && !with_recovery_key {
+        // The usual check goes through `serve`, the only program that touches the backup
+        // folder (R32), so it never needs a file-access permission for Terminal or an agent.
+        let check = vault::client::request_verify(paths)?;
+        println!("Backup {} (checked by vault serve)", check.file);
+        println!("  generation {}, written {} (newest)", check.generation, check.written_at);
+        println!("  decrypted with the vault's check key: OK, {} secrets", check.secrets);
+        println!(
+            "  matches the vault: {}",
+            if check.matches_vault { "yes, every name, rule and value" } else { "NO (the vault changed since)" }
+        );
+        println!("  recovery key: not checked (add --with-recovery-key)");
+        return if check.matches_vault { Ok(()) } else { Err(VaultError::BackupMismatch) };
+    }
+    println!("This reads the backup folder from this terminal. If it is in iCloud Drive and this");
+    println!("terminal app has never opened files there, macOS asks once; click Allow.");
     let vault = Vault::open(paths)?;
     let recovery = if with_recovery_key {
         Some(read_hidden("Recovery key (AGE-SECRET-KEY-1...), hidden: ")?)
@@ -468,6 +529,12 @@ fn verify_backup(paths: &Paths, file: Option<PathBuf>, with_recovery_key: bool) 
     Ok(())
 }
 
+fn backup_now(paths: &Paths) -> Result<(), VaultError> {
+    let status = Vault::open(paths)?.backup()?;
+    print_backup(&status);
+    if status.ok { Ok(()) } else { Err(VaultError::BackupFailed(status.detail)) }
+}
+
 fn restore(paths: &Paths, file: &Path) -> Result<(), VaultError> {
     let typed = read_hidden("Recovery key (AGE-SECRET-KEY-1...), hidden: ")?;
     let report = ops::restore(paths, file, typed)?;
@@ -476,11 +543,24 @@ fn restore(paths: &Paths, file: &Path) -> Result<(), VaultError> {
     for secret in &report.secrets {
         println!("  {:<24} {:<8} {}", secret.name, secret.kind.label(), secret.site);
     }
-    print_backup(&report.backup);
-    Ok(())
+    restart_serve(paths)?;
+    let backup = first_backup(paths)?;
+    print_backup(&backup);
+    if backup.ok { Ok(()) } else { Err(VaultError::BackupFailed(backup.detail)) }
 }
 
 fn reset(paths: &Paths) -> Result<(), VaultError> {
+    if Vault::open(paths)?.is_unused() {
+        println!("This vault never held a secret (its Recovery Kit isn't confirmed), so it can be");
+        println!("removed without the recovery key. The kit file, if still there, is deleted too.");
+        if !confirm("Remove it?")? {
+            println!("Nothing changed.");
+            return Ok(());
+        }
+        ops::reset_unused(paths)?;
+        println!("Unused vault removed. Run `vault init` to start again.");
+        return Ok(());
+    }
     println!("This removes the vault from this Mac (its vault file and key.se) so a backup");
     println!("can be restored. Backups and the audit log stay. It needs the recovery key, and it");
     println!("only goes ahead if the newest backup opens with that key and matches the vault.");

@@ -1,6 +1,7 @@
 //! `vault serve`: the background part agents talk to, over a socket only this user can reach
-//! (R22 to R25). It never writes the vault file or backups; changes come from the command-line
-//! tool, and `serve` reloads the vault file when it changes.
+//! (R22 to R25). It never writes the vault file; changes come from the command-line tool, and
+//! `serve` reloads the vault file when it changes. It is the only program that touches the
+//! backup folder (R32): the command-line tool asks it to write and check backups.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -8,7 +9,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use base64::Engine;
@@ -18,7 +19,8 @@ use crate::audit::{self, AuditEvent};
 use crate::error::VaultError;
 use crate::model::{Kind, VaultDoc};
 use crate::platform::{self, Peer};
-use crate::protocol::{self, ErrorReply, ListReply, ProxyReplyOut, Request, TotpReply};
+use crate::backup;
+use crate::protocol::{self, BackupReply, ErrorReply, ListReply, ProxyReplyOut, Request, TotpReply, VerifyBackupReply};
 use crate::proxy::{self, ProxyRequest};
 use crate::secret::SecretValue;
 use crate::store::{self, Paths};
@@ -37,6 +39,7 @@ struct Server {
     snapshot: RwLock<Snapshot>,
     client: reqwest::blocking::Client,
     active: AtomicUsize,
+    backups: Mutex<()>,
 }
 
 pub fn serve(paths: &Paths) -> Result<(), VaultError> {
@@ -66,6 +69,7 @@ pub fn serve(paths: &Paths) -> Result<(), VaultError> {
         snapshot: RwLock::new(Snapshot { fingerprint: store::fingerprint(paths), doc: Arc::new(doc) }),
         client,
         active: AtomicUsize::new(0),
+        backups: Mutex::new(()),
     });
     let mut event = AuditEvent::new("serve", "started");
     event.detail = Some(format!("pid {}, socket {}", std::process::id(), paths.socket.display()));
@@ -181,6 +185,39 @@ impl Server {
                     reply(&mut stream, &ErrorReply::from(&error))
                 }
             },
+            Request::Backup => {
+                let _one_at_a_time = self.backups.lock().unwrap_or_else(|e| e.into_inner());
+                match backup::write_and_verify(&doc) {
+                    Ok(status) => {
+                        let mut event = AuditEvent::new("backup-request", "ok");
+                        event.detail = Some(format!("generation {}: {}", status.generation, status.detail));
+                        self.audit(with_peer(event, &peer));
+                        reply(&mut stream, &BackupReply { ok: true, backup: status })
+                    }
+                    Err(error) => {
+                        let mut event = AuditEvent::new("backup-request", &format!("failed: {}", error.code()));
+                        event.detail = Some(error.to_string());
+                        self.audit(with_peer(event, &peer));
+                        reply(&mut stream, &ErrorReply::from(&error))
+                    }
+                }
+            }
+            Request::VerifyBackup => {
+                let _one_at_a_time = self.backups.lock().unwrap_or_else(|e| e.into_inner());
+                match backup::check_newest(&doc) {
+                    Ok(check) => {
+                        let outcome = if check.matches_vault { "ok" } else { "differs from vault" };
+                        let mut event = AuditEvent::new("verify-backup", outcome);
+                        event.detail = Some(format!("{} (generation {})", check.file, check.generation));
+                        self.audit(with_peer(event, &peer));
+                        reply(&mut stream, &VerifyBackupReply { ok: true, check })
+                    }
+                    Err(error) => {
+                        self.audit(with_peer(AuditEvent::new("verify-backup", &format!("failed: {}", error.code())), &peer));
+                        reply(&mut stream, &ErrorReply::from(&error))
+                    }
+                }
+            }
             Request::Proxy { name, method, path, headers, body, body_base64 } => {
                 let outcome = self.proxy(&doc, &name, method, path, headers, body, body_base64, &peer);
                 match outcome {

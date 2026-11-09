@@ -52,10 +52,11 @@ impl Paths {
         })
     }
 
-    /// iCloud Drive's folder for vault backups, if iCloud Drive is set up on this Mac.
-    pub fn icloud_backups(&self) -> Option<PathBuf> {
-        let drive = self.home.join("Library/Mobile Documents/com~apple~CloudDocs");
-        drive.is_dir().then(|| drive.join("Volgenic Vault Backups"))
+    /// The suggested backup folder, in iCloud Drive. Not checked here: even looking inside
+    /// iCloud Drive from Terminal can make macOS ask for permission, so only `serve` touches it
+    /// (R32), and the first backup reports a missing iCloud Drive.
+    pub fn icloud_backups(&self) -> PathBuf {
+        self.home.join("Library/Mobile Documents/com~apple~CloudDocs/Volgenic Vault Backups")
     }
 }
 

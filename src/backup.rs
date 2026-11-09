@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 
 use crate::error::VaultError;
 use crate::model::{BackupPayload, BackupStatus, Record, VAULT_FORMAT, VaultDoc};
+use crate::protocol::BackupCheck;
 use crate::secret::SecretValue;
 use crate::store;
 
@@ -61,11 +62,53 @@ fn file_prefix(vault_id: &str) -> String {
     format!("vault-backup-{}-", &vault_id[..vault_id.len().min(8)])
 }
 
-/// Writes a new backup of `doc`, reads it back from disk, decrypts it with the check key and
-/// compares it byte for byte (R19). Then prunes old generations.
+/// Makes the backup folder if it is missing, but only its last part: a folder whose parent
+/// doesn't exist (iCloud Drive turned off, a typo) is an error, never a new tree on this disk.
+fn ensure_backup_dir(dir: &Path) -> Result<(), VaultError> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    if !dir.parent().is_some_and(Path::is_dir) {
+        return Err(VaultError::BackupFailed(format!(
+            "the folder holding {} doesn't exist (is iCloud Drive turned on?)",
+            dir.display()
+        )));
+    }
+    fs::create_dir(dir).map_err(|e| VaultError::BackupFailed(format!("can't create {}: {e}", dir.display())))
+}
+
+/// This generation's backup file, if one is already written.
+fn written_for(dir: &Path, vault_id: &str, generation: u64) -> Option<PathBuf> {
+    let prefix = format!("{}{generation:06}-", file_prefix(vault_id));
+    list(dir, vault_id)
+        .into_iter()
+        .rev()
+        .find(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&prefix)))
+}
+
+/// Makes sure the current generation has a good backup (R18, R19). If one is already written,
+/// it is read back, decrypted and compared with the vault instead of written again, so asking
+/// twice can never push older generations out. Otherwise a new one is written, read back from
+/// disk, decrypted with the check key and compared byte for byte, and old generations pruned.
+/// Only `serve` calls this (R32).
 pub(crate) fn write_and_verify(doc: &VaultDoc) -> Result<BackupStatus, VaultError> {
     let dir = PathBuf::from(&doc.backup_dir);
-    fs::create_dir_all(&dir).map_err(|e| VaultError::BackupFailed(format!("can't create {}: {e}", dir.display())))?;
+    ensure_backup_dir(&dir)?;
+    if let Some(file) = written_for(&dir, &doc.vault_id, doc.generation) {
+        let check = parse_identity(&doc.check_identity)
+            .map_err(|_| VaultError::BackupFailed("the check key is malformed".into()))?;
+        let payload = open(&file, &check)?;
+        if !matches_doc(&payload, doc) {
+            return Err(VaultError::BackupMismatch);
+        }
+        return Ok(BackupStatus {
+            file: file.display().to_string(),
+            at: payload.written_at,
+            generation: doc.generation,
+            ok: true,
+            detail: "already written; read back and decrypted".into(),
+        });
+    }
 
     let written_at = crate::now_rfc3339();
     let payload = BackupPayloadRef {
@@ -139,6 +182,28 @@ pub(crate) fn open(path: &Path, identity: &dyn age::Identity) -> Result<BackupPa
         return Err(VaultError::BackupFailed("unknown backup format".into()));
     }
     Ok(payload)
+}
+
+/// Whether a decrypted backup holds exactly what the vault holds.
+fn matches_doc(payload: &BackupPayload, doc: &VaultDoc) -> bool {
+    payload.vault_id == doc.vault_id
+        && payload.recovery_recipient == doc.recovery_recipient
+        && crate::vault::same_records(&payload.records, &doc.records)
+}
+
+/// Decrypts the newest backup with the check key and compares it with the vault (R19). Only
+/// `serve` calls this (R32); `vault verify-backup` asks it over the socket.
+pub(crate) fn check_newest(doc: &VaultDoc) -> Result<BackupCheck, VaultError> {
+    let file = latest(Path::new(&doc.backup_dir), &doc.vault_id).ok_or(VaultError::NoBackup)?;
+    let check = parse_identity(&doc.check_identity)?;
+    let payload = open(&file, &check)?;
+    Ok(BackupCheck {
+        file: file.display().to_string(),
+        generation: payload.generation,
+        written_at: payload.written_at.clone(),
+        secrets: payload.records.len(),
+        matches_vault: matches_doc(&payload, doc),
+    })
 }
 
 /// This vault's backups in `dir`, oldest first.

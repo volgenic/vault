@@ -7,6 +7,7 @@
 
 pub mod audit;
 pub mod backup;
+pub mod client;
 pub mod error;
 pub mod keyprotect;
 pub mod model;

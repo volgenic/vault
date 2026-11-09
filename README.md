@@ -37,6 +37,12 @@ Linux version (systemd credentials, a TPM where present) replaces just that modu
   password, plus a check key that lives only inside the vault, so the vault reads every backup
   back and decrypts it right after writing it, and refuses further changes if that fails. Your kit
   opens a backup anywhere, even without Volgenic: `age -d -i <file with the key> <backup>`.
+- **Only `vault serve` touches the backup folder.** iCloud Drive is a folder macOS guards: the
+  first program to open files there gets a "would like to access files" dialog. So the
+  command-line tool never reads or writes the backup folder itself; it asks `vault serve`. That
+  dialog then comes once, during `vault init`, for the vault itself, and macOS remembers the
+  answer for the vault's signature, which every build keeps. An agent running `vault delete`
+  can't raise it.
 - **An audit log** (`audit.log` in the vault folder) records every request and command, refusals
   included, as hash-chained JSON lines: names, hosts, paths and outcomes, never a value, query or
   body.
@@ -67,8 +73,9 @@ The `vault` tool can't print a secret, so it is safe for any agent on the Mac to
 | `vault list` | Names, kinds and sites. |
 | `vault status` | Protected key, Secure Enclave, automatic login, FileVault, signature, kit, backups, audit chain. |
 | `vault audit [--all]` | The audit log, with its hash chain checked. |
-| `vault verify-backup [--with-recovery-key]` | Decrypts the newest backup and compares it with the vault; optionally proves the kit opens it. |
-| `vault reset` | Removes this Mac's vault (needs the recovery key, and a newest backup that opens with it). |
+| `vault verify-backup [--with-recovery-key]` | Has `vault serve` decrypt the newest backup and compare it with the vault. With the recovery key, also proves the kit opens it (that reads the folder from your terminal). |
+| `vault backup` | Has `vault serve` write (or re-check) the current backup now, e.g. after a failure. |
+| `vault reset` | Removes this Mac's vault (needs the recovery key, and a newest backup that opens with it). A vault whose kit was never confirmed holds nothing and goes without the key. |
 | `vault restore FILE` | Restores a backup into a fresh vault with the recovery key; new Secure Enclave key and vault key. |
 | `vault install-agent` | Installs the LaunchAgent `com.volgenic.vault`, which runs `vault serve` at login. |
 | `vault serve` | The background part agents talk to. |
@@ -92,6 +99,9 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   The key goes only into the header its rule names, only to the rule's host, method and path.
   Redirects come back to you unfollowed. A reply that contains the key is withheld
   (`echo_blocked`).
+- `backup` and `verify-backup` are how the command-line tool has `vault serve` write and check
+  backups. They return only file names, generations, times and counts. `backup` never writes a
+  second file for the same generation, so repeating it can't push older generations out.
 - Errors are `{"ok":false,"error":"rule_mismatch","message":"..."}`.
 
 ## Build

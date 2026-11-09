@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::audit::{self, AuditEvent};
 use crate::backup;
+use crate::client;
 use crate::error::VaultError;
 use crate::keyprotect;
 use crate::model::{self, BackupStatus, Kind, Record, SecretSummary, VAULT_FORMAT, VaultDoc};
@@ -45,7 +46,6 @@ pub struct InitReport {
     pub recovery_fingerprint: String,
     pub kit_path: PathBuf,
     pub backup_dir: PathBuf,
-    pub backup: BackupStatus,
 }
 
 pub struct VerifyReport {
@@ -62,7 +62,6 @@ pub struct RestoreReport {
     pub vault_id: String,
     pub secrets: Vec<SecretSummary>,
     pub from_generation: u64,
-    pub backup: BackupStatus,
 }
 
 /// What `vault status` shows. Information only; no values.
@@ -149,15 +148,13 @@ pub fn init(paths: &Paths, options: &InitOptions) -> Result<InitReport, VaultErr
     event.detail = Some(format!("vault {vault_id}, recovery key {fingerprint}"));
     doc.audit_head = audit_event(paths, event)?;
     store::save(paths, &key, &doc)?;
-
-    let mut vault = Vault { paths: paths.clone(), key, doc };
-    let backup = vault.backup_now();
+    // The first backup comes next, from `serve` (R32): the command-line tool starts it, then
+    // calls `Vault::backup`.
     Ok(InitReport {
         vault_id,
         recovery_fingerprint: fingerprint,
         kit_path: options.kit_path.clone(),
         backup_dir: options.backup_dir.clone(),
-        backup,
     })
 }
 
@@ -245,6 +242,11 @@ impl Vault {
         self.doc.kit_confirmed
     }
 
+    /// A vault that never held a secret: its kit isn't confirmed, so nothing could be stored.
+    pub fn is_unused(&self) -> bool {
+        !self.doc.kit_confirmed && self.doc.records.is_empty()
+    }
+
     pub fn audit(&self, event: AuditEvent) -> Result<String, VaultError> {
         audit_event(&self.paths, event)
     }
@@ -259,10 +261,18 @@ impl Vault {
         if status.ok { Ok(status) } else { Err(VaultError::BackupFailed(status.detail)) }
     }
 
-    /// Writes and verifies a backup, records the result in the vault file and the audit log,
-    /// and returns it. A failure is the alarm of R19: audit entry, `status`, the log.
+    /// Asks `serve` for the current generation's backup and records the result. Used by
+    /// `vault init` and `vault restore` once `serve` runs, and by `vault backup` to retry.
+    pub fn backup(&mut self) -> Result<BackupStatus, VaultError> {
+        let _lock = store::lock_for_change(&self.paths)?;
+        Ok(self.backup_now())
+    }
+
+    /// Has `serve` write and verify a backup (R32), records the result in the vault file and
+    /// the audit log, and returns it. A failure is the alarm of R19: audit entry, `status`,
+    /// the log.
     fn backup_now(&mut self) -> BackupStatus {
-        let status = match backup::write_and_verify(&self.doc) {
+        let status = match client::request_backup(&self.paths) {
             Ok(status) => status,
             Err(error) => BackupStatus {
                 file: String::new(),
@@ -274,7 +284,7 @@ impl Vault {
         };
         let mut event = AuditEvent::new("backup", if status.ok { "ok" } else { "FAILED" });
         event.detail = Some(if status.ok {
-            format!("generation {} written and verified: {}", status.generation, status.file)
+            format!("generation {} {}: {}", status.generation, status.detail, status.file)
         } else {
             format!("ALARM: {}", status.detail)
         });
@@ -457,7 +467,7 @@ pub(crate) fn totp_code(doc: &VaultDoc, name: &str) -> Result<TotpCode, VaultErr
 }
 
 /// Whether two record lists hold the same secrets: names, kinds, sites, rules and values.
-fn same_records(a: &[Record], b: &[Record]) -> bool {
+pub(crate) fn same_records(a: &[Record], b: &[Record]) -> bool {
     a.len() == b.len()
         && a.iter().all(|x| {
             b.iter().any(|y| {
@@ -522,9 +532,7 @@ pub fn restore(paths: &Paths, file: &Path, typed: SecretValue) -> Result<Restore
     ));
     doc.audit_head = audit_event(paths, event)?;
     store::save(paths, &key, &doc)?;
-    let mut vault = Vault { paths: paths.clone(), key, doc };
-    let backup = vault.backup_now();
-    Ok(RestoreReport { vault_id: payload.vault_id, secrets, from_generation: payload.generation, backup })
+    Ok(RestoreReport { vault_id: payload.vault_id, secrets, from_generation: payload.generation })
 }
 
 /// Removes this Mac's vault so a backup can be restored into a fresh one (R20). Needs the
@@ -533,6 +541,10 @@ pub fn restore(paths: &Paths, file: &Path, typed: SecretValue) -> Result<Restore
 pub fn reset(paths: &Paths, typed: SecretValue) -> Result<PathBuf, VaultError> {
     let vault = Vault::open(paths)?;
     let _lock = store::lock_for_change(paths)?;
+    if vault.is_unused() {
+        drop(typed);
+        return remove_unused(paths, &vault);
+    }
     let identity = backup::parse_identity(&typed);
     let report = vault.verify_backup(None, Some(typed))?;
     let proven = identity.is_ok_and(|id| backup::public_of(&id) == vault.doc.recovery_recipient)
@@ -551,6 +563,30 @@ pub fn reset(paths: &Paths, typed: SecretValue) -> Result<PathBuf, VaultError> {
     keyprotect::remove(&paths.dir)?;
     fs::remove_file(&paths.vault_file)?;
     Ok(report.file)
+}
+
+/// Removes a vault that never held a secret: the kit isn't confirmed, so nothing could be
+/// stored (R17). This is how setup starts over, for example when the first backup to the
+/// chosen folder failed. Anyone who could do this could already read the unconfirmed kit.
+pub fn reset_unused(paths: &Paths) -> Result<(), VaultError> {
+    let vault = Vault::open(paths)?;
+    let _lock = store::lock_for_change(paths)?;
+    if !vault.is_unused() {
+        return Err(VaultError::KitAlreadyConfirmed);
+    }
+    remove_unused(paths, &vault).map(|_| ())
+}
+
+fn remove_unused(paths: &Paths, vault: &Vault) -> Result<PathBuf, VaultError> {
+    let mut event = AuditEvent::new("reset", "ok");
+    event.detail = Some("unused vault removed (kit not confirmed, no secrets); vault file and key.se".into());
+    vault.audit(event)?;
+    if let Some(kit) = &vault.doc.kit_path {
+        let _ = wipe_file(Path::new(kit));
+    }
+    keyprotect::remove(&paths.dir)?;
+    fs::remove_file(&paths.vault_file)?;
+    Ok(PathBuf::new())
 }
 
 /// Gathers `vault status`. Opens the vault only if it exists.
