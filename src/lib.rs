@@ -1,6 +1,6 @@
-//! The vault's library. Decisions live here as functions over plain values; the Keychain and
-//! Secure Enclave code stays behind one small key-protection module (`keyprotect`), so the
-//! rest can build on Linux later.
+//! The vault's library. Decisions live here as functions over plain values; the Secure Enclave
+//! code stays behind one small key-protection module (`keyprotect`), so the rest can build on
+//! Linux later. The vault never uses the Keychain, so it never raises a Keychain dialog.
 //!
 //! The rules this code follows are numbered on the threat model page,
 //! https://volgenic.com/pages/4171d207-a31e-4d38-b659-60ceed9ee5fd, and cited as R1, R2, ...

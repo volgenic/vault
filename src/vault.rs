@@ -69,7 +69,7 @@ pub struct RestoreReport {
 pub struct StatusReport {
     pub vault_folder: PathBuf,
     pub vault_exists: bool,
-    pub keychain_item: Result<bool, VaultError>,
+    pub key_file: bool,
     pub secure_enclave: bool,
     pub key_protection: &'static str,
     pub auto_login_on: bool,
@@ -112,7 +112,7 @@ pub fn init(paths: &Paths, options: &InitOptions) -> Result<InitReport, VaultErr
     }
     store::ensure_private_dir(&paths.dir)?;
     let _lock = store::lock_for_change(paths)?;
-    if store::vault_exists(paths) || keyprotect::exists()? {
+    if store::vault_exists(paths) || keyprotect::exists(&paths.dir) {
         return Err(VaultError::AlreadyInitialized);
     }
 
@@ -126,7 +126,7 @@ pub fn init(paths: &Paths, options: &InitOptions) -> Result<InitReport, VaultErr
     drop(recovery_secret);
 
     let key = SecretValue::random(32)?;
-    if let Err(error) = keyprotect::store_new(&key) {
+    if let Err(error) = keyprotect::store_new(&paths.dir, &key) {
         let _ = wipe_file(&options.kit_path);
         return Err(error);
     }
@@ -228,7 +228,7 @@ impl Vault {
             return Err(VaultError::NotInitialized);
         }
         store::check_private_dir(&paths.dir)?;
-        let key = keyprotect::load()?;
+        let key = keyprotect::load(&paths.dir)?;
         let doc = store::load(paths, &key)?;
         Ok(Vault { paths: paths.clone(), key, doc })
     }
@@ -481,7 +481,7 @@ pub fn restore(paths: &Paths, file: &Path, typed: SecretValue) -> Result<Restore
     }
     store::ensure_private_dir(&paths.dir)?;
     let _lock = store::lock_for_change(paths)?;
-    if store::vault_exists(paths) || keyprotect::exists()? {
+    if store::vault_exists(paths) || keyprotect::exists(&paths.dir) {
         return Err(VaultError::AlreadyInitialized);
     }
     let identity = backup::parse_identity(&typed)?;
@@ -496,7 +496,7 @@ pub fn restore(paths: &Paths, file: &Path, typed: SecretValue) -> Result<Restore
         .unwrap_or_else(|| paths.local_backups.clone());
     let (check_secret, _) = backup::new_identity();
     let key = SecretValue::random(32)?;
-    keyprotect::store_new(&key)?;
+    keyprotect::store_new(&paths.dir, &key)?;
 
     let secrets = payload.records.iter().map(Record::summary).collect();
     let mut doc = VaultDoc {
@@ -546,9 +546,9 @@ pub fn reset(paths: &Paths, typed: SecretValue) -> Result<PathBuf, VaultError> {
         return Err(VaultError::BackupMismatch);
     }
     let mut event = AuditEvent::new("reset", "ok");
-    event.detail = Some(format!("vault removed; newest backup {}", report.file.display()));
+    event.detail = Some(format!("vault removed (vault file and key.se); newest backup {}", report.file.display()));
     vault.audit(event)?;
-    keyprotect::remove()?;
+    keyprotect::remove(&paths.dir)?;
     fs::remove_file(&paths.vault_file)?;
     Ok(report.file)
 }
@@ -560,7 +560,7 @@ pub fn status(paths: &Paths) -> StatusReport {
     let mut report = StatusReport {
         vault_folder: paths.dir.clone(),
         vault_exists,
-        keychain_item: keyprotect::exists(),
+        key_file: keyprotect::exists(&paths.dir),
         secure_enclave: keyprotect::hardware_available(),
         key_protection: keyprotect::DESCRIPTION,
         auto_login_on: platform::auto_login_on(),

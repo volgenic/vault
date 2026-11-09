@@ -1,25 +1,22 @@
 // The vault's macOS key protection: the only code in volgenic/vault that touches the Secure
-// Enclave or the Keychain (threat model rule R30). Rust calls it through the C functions below.
+// Enclave (threat model rule R30). Rust calls it through the C functions below.
 //
 // - The Secure Enclave key is a P-256 key-agreement key made by CryptoKit for this Mac only,
 //   usable after the first unlock and with no fingerprint or password, so the vault works
 //   unattended. CryptoKit hands back an opaque handle (`dataRepresentation`) that works only in
 //   this Mac's Secure Enclave.
 // - The vault key is wrapped to that key: an ephemeral P-256 key, ECDH, HKDF-SHA256, AES-GCM.
-// - The handle, the public key and the wrapped vault key live in one generic-password item,
-//   service "com.volgenic.vault", in the login keychain. The item is created by the vault
-//   itself, so its access list trusts the vault build that created it (R14).
+// - The shim never touches the Keychain: no Keychain item means no Keychain dialog, ever, for
+//   any build (the owner's zero-prompt rule on the threat model page). Rust stores the handle
+//   and the wrapped key in the vault folder (src/keyprotect/macos.rs).
 //
-// Return codes: 0 ok, 1 output buffer too small, 2 Secure Enclave error, 3 item already exists,
-// 4 item not found, 5 other Keychain error, 6 bad input or crypto failure.
+// Return codes: 0 ok, 1 output buffer too small, 2 Secure Enclave error, 6 bad input or crypto
+// failure.
 
 import CryptoKit
 import Foundation
 import Security
 
-private let itemService = "com.volgenic.vault"
-private let itemAccount = "vault-key"
-private let itemLabel = "com.volgenic.vault"
 private let wrapInfo = Data("com.volgenic.vault/se-wrap/v1".utf8)
 private let p256PublicLength = 65
 
@@ -117,65 +114,4 @@ public func vkp_se_unwrap(
     } catch {
         return 6
     }
-}
-
-private func baseQuery() -> [String: Any] {
-    // No kSecUseDataProtectionKeychain: that keychain needs an entitlement a command-line
-    // program can't carry, so this is the login keychain (file-based), as R14 intends.
-    return [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: itemService,
-        kSecAttrAccount as String: itemAccount,
-    ]
-}
-
-/// Stores the key-protection record. Fails with 3 if the item already exists.
-@_cdecl("vkp_kc_put")
-public func vkp_kc_put(_ data: UnsafePointer<UInt8>, _ len: Int) -> Int32 {
-    var query = baseQuery()
-    query[kSecAttrLabel as String] = itemLabel
-    query[kSecAttrDescription as String] = "Volgenic vault key, wrapped by the Secure Enclave"
-    query[kSecValueData as String] = Data(bytes: data, count: len)
-    let status = SecItemAdd(query as CFDictionary, nil)
-    if status == errSecSuccess { return 0 }
-    if status == errSecDuplicateItem { return 3 }
-    return 5
-}
-
-/// Reads the key-protection record.
-@_cdecl("vkp_kc_get")
-public func vkp_kc_get(
-    _ out: UnsafeMutablePointer<UInt8>, _ cap: Int, _ outLen: UnsafeMutablePointer<Int>
-) -> Int32 {
-    var query = baseQuery()
-    query[kSecReturnData as String] = true
-    query[kSecMatchLimit as String] = kSecMatchLimitOne
-    var result: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
-    if status == errSecItemNotFound { return 4 }
-    guard status == errSecSuccess, let data = result as? Data else { return 5 }
-    return copyOut(data, out, cap, outLen)
-}
-
-/// Says whether the item exists, reading its attributes only (no secret data, so no prompt).
-/// Returns 1 if it exists, 0 if not, negative on error.
-@_cdecl("vkp_kc_exists")
-public func vkp_kc_exists() -> Int32 {
-    var query = baseQuery()
-    query[kSecReturnAttributes as String] = true
-    query[kSecMatchLimit as String] = kSecMatchLimitOne
-    var result: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
-    if status == errSecSuccess { return 1 }
-    if status == errSecItemNotFound { return 0 }
-    return -1
-}
-
-/// Deletes the item.
-@_cdecl("vkp_kc_delete")
-public func vkp_kc_delete() -> Int32 {
-    let status = SecItemDelete(baseQuery() as CFDictionary)
-    if status == errSecSuccess { return 0 }
-    if status == errSecItemNotFound { return 4 }
-    return 5
 }

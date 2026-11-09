@@ -7,7 +7,6 @@ use std::fmt;
 pub enum VaultError {
     UnsupportedPlatform,
     SecureEnclave,
-    Keychain,
     KeyProtection,
     Random,
     AlreadyInitialized,
@@ -48,7 +47,6 @@ impl VaultError {
         match self {
             UnsupportedPlatform => "unsupported_platform",
             SecureEnclave => "secure_enclave_error",
-            Keychain => "keychain_error",
             KeyProtection => "key_protection_error",
             Random => "random_error",
             AlreadyInitialized => "already_initialized",
@@ -90,7 +88,6 @@ impl fmt::Display for VaultError {
         match self {
             UnsupportedPlatform => write!(f, "the vault runs only on macOS for now (Linux is planned)"),
             SecureEnclave => write!(f, "the Secure Enclave refused the operation"),
-            Keychain => write!(f, "the Keychain refused the operation"),
             KeyProtection => write!(f, "the protected vault key is damaged or can't be opened"),
             Random => write!(f, "the operating system's random number generator failed"),
             AlreadyInitialized => write!(f, "a vault already exists on this Mac"),

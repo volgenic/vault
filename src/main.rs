@@ -184,7 +184,9 @@ fn expand_home(paths: &Paths, text: &str) -> PathBuf {
 
 fn init(paths: &Paths, kit: Option<PathBuf>, backup_dir: Option<PathBuf>) -> Result<(), VaultError> {
     println!("Setting up Volgenic's vault on this Mac.\n");
-    let default_kit = paths.home.join("Desktop/Volgenic Vault Recovery Kit.txt");
+    // The kit's default home is the vault folder: outside Desktop, Documents and Downloads,
+    // so writing it can't raise a macOS file-access dialog.
+    let default_kit = paths.dir.join("Volgenic Vault Recovery Kit.txt");
     let kit_path = match kit {
         Some(path) => path,
         None => {
@@ -203,6 +205,9 @@ fn init(paths: &Paths, kit: Option<PathBuf>, backup_dir: Option<PathBuf>) -> Res
             println!("Keep them off this Mac's disk so a lost or stolen Mac doesn't take them along.");
             if paths.icloud_backups().is_some() {
                 println!("Suggested: iCloud Drive (Apple stores only ciphertext; Volgenic stores nothing).");
+                println!("If Terminal hasn't used iCloud Drive before, macOS may now ask once whether");
+                println!("Terminal may access files in iCloud Drive. That is for this backup folder: click");
+                println!("Allow. It is the only dialog setup can show; the vault never uses the Keychain.");
             }
             let answer = ask(&format!("Backup folder [{}]: ", suggested.display()))?;
             if answer.is_empty() { suggested } else { expand_home(paths, &answer) }
@@ -211,13 +216,14 @@ fn init(paths: &Paths, kit: Option<PathBuf>, backup_dir: Option<PathBuf>) -> Res
     println!();
     let report = ops::init(paths, &InitOptions { kit_path, backup_dir })?;
     println!("Vault created: {}", report.vault_id);
-    println!("  vault key:        wrapped by this Mac's Secure Enclave, in Keychain item com.volgenic.vault");
+    println!("  vault key:        wrapped by this Mac's Secure Enclave (key.se in the vault folder)");
     println!("  Recovery Kit:     {}", report.kit_path.display());
     println!("  recovery key:     fingerprint {}", report.recovery_fingerprint);
     println!("  backups:          {}", report.backup_dir.display());
     print_backup(&report.backup);
     println!();
-    println!("Next: open the kit, print it or save the key in your password manager, then run");
+    println!("Next: open the kit (open -e {:?}),", report.kit_path.display().to_string());
+    println!("print it or save the key in your password manager, then run");
     println!("  vault confirm-kit");
     println!("The vault stores no secret until the kit is confirmed.");
     Ok(())
@@ -344,10 +350,8 @@ fn status(paths: &Paths) -> Result<(), VaultError> {
     println!("  vault folder:      {}", report.vault_folder.display());
     println!("  Secure Enclave:    {}", if report.secure_enclave { "available" } else { "NOT available" });
     println!("  key protection:    {}", report.key_protection);
-    match &report.keychain_item {
-        Ok(present) => println!("  Keychain item:     {}", if *present { "present" } else { "absent" }),
-        Err(error) => println!("  Keychain item:     unknown ({error})"),
-    }
+    println!("  protected key:     {}", if report.key_file { "present (key.se)" } else { "absent" });
+    println!("  Keychain:          not used (no Keychain dialogs, ever)");
     println!(
         "  automatic login:   {}",
         if report.auto_login_on { "ON: the vault refuses to run until it is turned off" } else { "off (required)" }
@@ -477,7 +481,7 @@ fn restore(paths: &Paths, file: &Path) -> Result<(), VaultError> {
 }
 
 fn reset(paths: &Paths) -> Result<(), VaultError> {
-    println!("This removes the vault from this Mac (its file and its Keychain item) so a backup");
+    println!("This removes the vault from this Mac (its vault file and key.se) so a backup");
     println!("can be restored. Backups and the audit log stay. It needs the recovery key, and it");
     println!("only goes ahead if the newest backup opens with that key and matches the vault.");
     if !confirm("Go ahead?")? {

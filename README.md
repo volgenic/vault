@@ -22,13 +22,13 @@ Linux version (systemd credentials, a TPM where present) replaces just that modu
 - **The Secure Enclave** wraps it. The vault makes a P-256 key inside this Mac's Secure Enclave,
   usable unattended (no fingerprint) but only on this Mac, and wraps the vault key to it. A copy
   of the vault's files on any other machine is useless.
-- **The Keychain** holds the wrapped key and the Secure Enclave handle, in the login-Keychain
-  item `com.volgenic.vault`. Its access list trusts only the vault build that created it, so any
-  other program that asks gets a macOS prompt. **Never click Allow on a prompt about
-  `com.volgenic.vault` unless it names a vault build you just installed yourself.** The login
-  keychain is encrypted with your login password, which is why the vault refuses to run while
-  automatic login is on (that setting keeps the password in `/etc/kcpassword`, easy to reverse).
-  FileVault isn't required; `vault status` reports it.
+- **No Keychain, so no dialogs.** The Secure Enclave handle and the wrapped vault key live in
+  `key.se` in the vault folder (readable only by you). The vault never uses the Keychain, so no
+  setup step, rebuild or update raises a Keychain or password dialog. Opening the key needs this
+  Mac's Secure Enclave and, after a restart, your login: the Secure Enclave key is usable only
+  once you have logged in. That is also why the vault refuses to run while automatic login is on
+  (it would log the Mac in by itself, and it keeps the login password in `/etc/kcpassword`, easy
+  to reverse). FileVault isn't required; `vault status` reports it.
 - **The Recovery Kit comes first.** `vault init` makes a recovery key pair and writes the kit to
   a file. The vault stores no secret until you confirm the kit by pasting the key back
   (`vault confirm-kit`), which also deletes the file.
@@ -45,7 +45,10 @@ Linux version (systemd credentials, a TPM where present) replaces just that modu
   logged, cloned or serialized into a reply.
 
 What it does not stop yet: any agent on the Mac can *use* any key within its rule and get any 2FA
-code, and can delete secrets (device-signed approvals come later). The vault can't yet tell the
+code, and can delete secrets (device-signed approvals come later). An agent that runs its own
+code as you can also read `key.se` and the vault file and ask this Mac's Secure Enclave to open
+them: on one macOS user account nothing separates the vault's files from yours. The fix is
+running the vault as its own macOS user, a planned next step. The vault can't yet tell the
 Volgenic host from an agent: both run as Homebrew's `node`. The threat model page says what each
 attacker can reach.
 
@@ -55,14 +58,14 @@ The `vault` tool can't print a secret, so it is safe for any agent on the Mac to
 
 | Command | What it does |
 |---|---|
-| `vault init` | Sets up the vault: Secure Enclave key, Keychain item, Recovery Kit, backup folder. Refuses if a vault exists or automatic login is on. |
+| `vault init` | Sets up the vault: Secure Enclave key, Recovery Kit, backup folder. Refuses if a vault exists or automatic login is on. |
 | `vault confirm-kit` | Paste the recovery key back; unlocks storing secrets and deletes the kit file. |
 | `vault add NAME --kind api-key --host HOST --method GET --path /v1 --header "Authorization: Bearer {key}"` | Adds an API key with its rule. The value is read at a hidden prompt (or from standard input with `--yes`). |
 | `vault add NAME --kind login --site SITE --username USER` | Adds a login. Stored and listed only, for now. |
 | `vault add NAME --kind 2fa --site SITE` | Adds a 2FA seed: base32, or an `otpauth://` link. |
 | `vault delete NAME` | Deletes a secret. Earlier backups keep it. |
 | `vault list` | Names, kinds and sites. |
-| `vault status` | Keychain item, Secure Enclave, automatic login, FileVault, signature, kit, backups, audit chain. |
+| `vault status` | Protected key, Secure Enclave, automatic login, FileVault, signature, kit, backups, audit chain. |
 | `vault audit [--all]` | The audit log, with its hash chain checked. |
 | `vault verify-backup [--with-recovery-key]` | Decrypts the newest backup and compares it with the vault; optionally proves the kit opens it. |
 | `vault reset` | Removes this Mac's vault (needs the recovery key, and a newest backup that opens with it). |
@@ -104,10 +107,9 @@ codesign --force --sign "Volgenic Vault Local Signing" --options runtime \
   --identifier com.volgenic.vault target/release/vault
 ```
 
-Every build is signed with the same self-signed certificate, kept in the login keychain, with the
-hardened runtime. That certificate has no Apple Team ID, so macOS ties the Keychain item to each
-exact build: **the first run of a new build shows one Keychain prompt.** Install a new build
-deliberately, run it once, and click Allow only on a prompt naming that build's path.
+Every build is signed with the same self-signed certificate, with the hardened runtime. Because
+the vault keeps nothing in the Keychain, nothing depends on that signature staying the same: a
+rebuild or an update shows no dialog.
 
 ## Tests: none, as an experiment
 

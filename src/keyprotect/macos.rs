@@ -1,12 +1,15 @@
-//! macOS key protection, through the Swift shim in `macos.swift` (built by build.rs).
+//! macOS key protection, through the Swift shim in `macos.swift` (built by build.rs). Secure
+//! Enclave only; no Keychain, so no Keychain dialog for any build.
+
+use std::path::Path;
 
 use zeroize::Zeroize;
 
 use crate::error::VaultError;
 use crate::secret::SecretValue;
+use crate::store;
 
-pub const DESCRIPTION: &str =
-    "Secure Enclave key; wrapped vault key in login-Keychain item com.volgenic.vault";
+pub const DESCRIPTION: &str = "Secure Enclave key for this Mac only; wrapped vault key in key.se (no Keychain)";
 
 unsafe extern "C" {
     fn vkp_se_available() -> i32;
@@ -36,22 +39,15 @@ unsafe extern "C" {
         cap: usize,
         out_len: *mut usize,
     ) -> i32;
-    fn vkp_kc_put(data: *const u8, len: usize) -> i32;
-    fn vkp_kc_get(out: *mut u8, cap: usize, out_len: *mut usize) -> i32;
-    fn vkp_kc_exists() -> i32;
-    fn vkp_kc_delete() -> i32;
 }
 
-const RECORD_MAGIC: &[u8; 4] = b"VKP1";
+const RECORD_MAGIC: &[u8; 4] = b"VKP2";
 const BUFFER: usize = 4096;
 
 fn check(code: i32) -> Result<(), VaultError> {
     match code {
         0 => Ok(()),
         2 => Err(VaultError::SecureEnclave),
-        3 => Err(VaultError::AlreadyInitialized),
-        4 => Err(VaultError::NotInitialized),
-        5 => Err(VaultError::Keychain),
         _ => Err(VaultError::KeyProtection),
     }
 }
@@ -60,18 +56,7 @@ pub fn hardware_available() -> bool {
     unsafe { vkp_se_available() == 1 }
 }
 
-pub fn exists() -> Result<bool, VaultError> {
-    match unsafe { vkp_kc_exists() } {
-        1 => Ok(true),
-        0 => Ok(false),
-        _ => Err(VaultError::Keychain),
-    }
-}
-
-pub fn store_new(vault_key: &SecretValue) -> Result<(), VaultError> {
-    if exists()? {
-        return Err(VaultError::AlreadyInitialized);
-    }
+pub fn store_new(file: &Path, vault_key: &SecretValue) -> Result<(), VaultError> {
     let mut handle = vec![0u8; BUFFER];
     let mut public = vec![0u8; 128];
     let (mut handle_len, mut public_len) = (0usize, 0usize);
@@ -113,17 +98,18 @@ pub fn store_new(vault_key: &SecretValue) -> Result<(), VaultError> {
     record.push(public_len);
     record.extend_from_slice(&public);
     record.extend_from_slice(&wrapped);
-    let result = check(unsafe { vkp_kc_put(record.as_ptr(), record.len()) });
+    let result = store::write_atomic(file, &record);
     record.zeroize();
     handle.zeroize();
     result
 }
 
-pub fn load() -> Result<SecretValue, VaultError> {
-    let mut record = vec![0u8; BUFFER];
-    let mut record_len = 0usize;
-    check(unsafe { vkp_kc_get(record.as_mut_ptr(), record.len(), &mut record_len) })?;
-    record.truncate(record_len);
+pub fn load(file: &Path) -> Result<SecretValue, VaultError> {
+    let mut record = match std::fs::read(file) {
+        Ok(record) => record,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(VaultError::NotInitialized),
+        Err(error) => return Err(error.into()),
+    };
     let result = unwrap_record(&record);
     record.zeroize();
     result
@@ -157,8 +143,4 @@ fn unwrap_record(record: &[u8]) -> Result<SecretValue, VaultError> {
     }
     out.truncate(out_len);
     Ok(SecretValue::from_vec(out))
-}
-
-pub fn remove() -> Result<(), VaultError> {
-    check(unsafe { vkp_kc_delete() })
 }
