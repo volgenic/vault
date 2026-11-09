@@ -1,0 +1,7 @@
+[package]
+name = "vault"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Volgenic's vault: keeps your agents' secrets on your own machine and lets agents use them without seeing them."
