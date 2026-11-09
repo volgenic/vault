@@ -161,6 +161,11 @@ pub(crate) fn write_and_verify(doc: &VaultDoc) -> Result<BackupStatus, VaultErro
 /// Decrypts an age file with one identity.
 pub fn decrypt_file(path: &Path, identity: &dyn age::Identity) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let data = fs::read(path).map_err(|e| VaultError::BackupFailed(format!("can't read {}: {e}", path.display())))?;
+    decrypt_bytes(&data, identity)
+}
+
+/// Decrypts age ciphertext with one identity.
+pub fn decrypt_bytes(data: &[u8], identity: &dyn age::Identity) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let decryptor = age::Decryptor::new_buffered(&data[..])
         .map_err(|_| VaultError::BackupFailed("not an age file".into()))?;
     let mut reader = decryptor
@@ -175,7 +180,13 @@ pub fn decrypt_file(path: &Path, identity: &dyn age::Identity) -> Result<Zeroizi
 
 /// Decrypts and parses a backup.
 pub(crate) fn open(path: &Path, identity: &dyn age::Identity) -> Result<BackupPayload, VaultError> {
-    let plain = decrypt_file(path, identity)?;
+    let data = fs::read(path).map_err(|e| VaultError::BackupFailed(format!("can't read {}: {e}", path.display())))?;
+    open_bytes(&data, identity)
+}
+
+/// Decrypts and parses a backup held in memory.
+pub(crate) fn open_bytes(data: &[u8], identity: &dyn age::Identity) -> Result<BackupPayload, VaultError> {
+    let plain = decrypt_bytes(data, identity)?;
     let payload: BackupPayload =
         serde_json::from_slice(&plain).map_err(|_| VaultError::BackupFailed("the backup's contents are damaged".into()))?;
     if payload.format != VAULT_FORMAT {
@@ -204,6 +215,13 @@ pub(crate) fn check_newest(doc: &VaultDoc) -> Result<BackupCheck, VaultError> {
         secrets: payload.records.len(),
         matches_vault: matches_doc(&payload, doc),
     })
+}
+
+/// The newest backup's path and encrypted bytes, for `serve`'s read-backup request (R32).
+pub(crate) fn read_newest(doc: &VaultDoc) -> Result<(PathBuf, Vec<u8>), VaultError> {
+    let file = latest(Path::new(&doc.backup_dir), &doc.vault_id).ok_or(VaultError::NoBackup)?;
+    let data = fs::read(&file).map_err(|e| VaultError::BackupFailed(format!("can't read {}: {e}", file.display())))?;
+    Ok((file, data))
 }
 
 /// This vault's backups in `dir`, oldest first.

@@ -7,6 +7,9 @@
 //!    "headers":{"accept":"application/json"},"body":"..."}            (or "body_base64")
 //!   {"op":"backup"}          write this generation's backup if it isn't written yet, and verify it
 //!   {"op":"verify-backup"}   decrypt the newest backup with the check key and compare it
+//!   {"op":"read-backup"}     the newest backup's encrypted bytes, for checks with the recovery
+//!                            key that the command-line tool makes itself (the key never
+//!                            crosses the socket)
 //!
 //! `backup` and `verify-backup` exist so that `serve` is the only program that ever touches the
 //! backup folder (R32): the command-line tool asks `serve` instead of reading or writing there
@@ -45,6 +48,7 @@ pub enum Request {
     },
     Backup,
     VerifyBackup,
+    ReadBackup,
 }
 
 #[derive(Serialize)]
@@ -92,6 +96,15 @@ pub struct BackupCheck {
 pub struct VerifyBackupReply {
     pub ok: bool,
     pub check: BackupCheck,
+}
+
+/// The newest backup as it sits in the folder: age ciphertext, readable only with the recovery
+/// key or the vault's own check key.
+#[derive(Serialize, Deserialize)]
+pub struct ReadBackupReply {
+    pub ok: bool,
+    pub file: String,
+    pub data_base64: String,
 }
 
 #[derive(Serialize)]

@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 
 use crate::error::VaultError;
-use crate::protocol::{BackupCheck, BackupReply, VerifyBackupReply};
+use crate::protocol::{BackupCheck, BackupReply, ReadBackupReply, VerifyBackupReply};
 use crate::store::Paths;
 
 /// Long enough for a person to answer a macOS permission dialog that holds up `serve`'s first
@@ -46,6 +46,16 @@ pub fn request_backup(paths: &Paths) -> Result<crate::model::BackupStatus, Vault
 /// Asks `serve` to decrypt the newest backup with the check key and compare it with the vault.
 pub fn request_verify(paths: &Paths) -> Result<BackupCheck, VaultError> {
     call::<VerifyBackupReply>(paths, r#"{"op":"verify-backup"}"#).map(|reply| reply.check)
+}
+
+/// Asks `serve` for the newest backup's encrypted bytes and the file's path.
+pub fn request_newest_backup(paths: &Paths) -> Result<(String, Vec<u8>), VaultError> {
+    use base64::Engine;
+    let reply = call::<ReadBackupReply>(paths, r#"{"op":"read-backup"}"#)?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(reply.data_base64)
+        .map_err(|_| VaultError::BackupFailed("`vault serve` sent an unreadable backup".into()))?;
+    Ok((reply.file, data))
 }
 
 /// Waits up to `wait` for `serve` to answer on the socket.

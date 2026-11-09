@@ -20,7 +20,7 @@ use crate::error::VaultError;
 use crate::model::{Kind, VaultDoc};
 use crate::platform::{self, Peer};
 use crate::backup;
-use crate::protocol::{self, BackupReply, ErrorReply, ListReply, ProxyReplyOut, Request, TotpReply, VerifyBackupReply};
+use crate::protocol::{self, BackupReply, ErrorReply, ListReply, ProxyReplyOut, ReadBackupReply, Request, TotpReply, VerifyBackupReply};
 use crate::proxy::{self, ProxyRequest};
 use crate::secret::SecretValue;
 use crate::store::{self, Paths};
@@ -214,6 +214,22 @@ impl Server {
                     }
                     Err(error) => {
                         self.audit(with_peer(AuditEvent::new("verify-backup", &format!("failed: {}", error.code())), &peer));
+                        reply(&mut stream, &ErrorReply::from(&error))
+                    }
+                }
+            }
+            Request::ReadBackup => {
+                let _one_at_a_time = self.backups.lock().unwrap_or_else(|e| e.into_inner());
+                match backup::read_newest(&doc) {
+                    Ok((file, data)) => {
+                        let mut event = AuditEvent::new("read-backup", "ok");
+                        event.detail = Some(file.display().to_string());
+                        self.audit(with_peer(event, &peer));
+                        let data_base64 = BASE64.encode(data);
+                        reply(&mut stream, &ReadBackupReply { ok: true, file: file.display().to_string(), data_base64 })
+                    }
+                    Err(error) => {
+                        self.audit(with_peer(AuditEvent::new("read-backup", &format!("failed: {}", error.code())), &peer));
                         reply(&mut stream, &ErrorReply::from(&error))
                     }
                 }

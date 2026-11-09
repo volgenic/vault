@@ -73,10 +73,10 @@ The `vault` tool can't print a secret, so it is safe for any agent on the Mac to
 | `vault list` | Names, kinds and sites. |
 | `vault status` | Protected key, Secure Enclave, automatic login, FileVault, signature, kit, backups, audit chain. |
 | `vault audit [--all]` | The audit log, with its hash chain checked. |
-| `vault verify-backup [--with-recovery-key]` | Has `vault serve` decrypt the newest backup and compare it with the vault. With the recovery key, also proves the kit opens it (that reads the folder from your terminal). |
+| `vault verify-backup [--with-recovery-key]` | Has `vault serve` decrypt the newest backup and compare it with the vault. With the recovery key, also proves the kit opens it: `vault serve` hands over the encrypted file and the check runs in your terminal, so the key never crosses the socket. |
 | `vault backup` | Has `vault serve` write (or re-check) the current backup now, e.g. after a failure. |
 | `vault reset` | Removes this Mac's vault (needs the recovery key, and a newest backup that opens with it). A vault whose kit was never confirmed holds nothing and goes without the key. |
-| `vault restore FILE` | Restores a backup into a fresh vault with the recovery key; new Secure Enclave key and vault key. |
+| `vault restore FILE` | Restores a backup into a fresh vault with the recovery key; new Secure Enclave key and vault key. Reads FILE from your terminal: in iCloud Drive, macOS may ask once whether the terminal may (a recovery step, not normal use). |
 | `vault install-agent` | Installs the LaunchAgent `com.volgenic.vault`, which runs `vault serve` at login. |
 | `vault serve` | The background part agents talk to. |
 
@@ -99,8 +99,9 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   The key goes only into the header its rule names, only to the rule's host, method and path.
   Redirects come back to you unfollowed. A reply that contains the key is withheld
   (`echo_blocked`).
-- `backup` and `verify-backup` are how the command-line tool has `vault serve` write and check
-  backups. They return only file names, generations, times and counts. `backup` never writes a
+- `backup`, `verify-backup` and `read-backup` are how the command-line tool has `vault serve`
+  write and check backups. They return file names, generations, times, counts and, for
+  `read-backup`, the newest backup's ciphertext (which only the recovery key or the vault opens). `backup` never writes a
   second file for the same generation, so repeating it can't push older generations out.
 - Errors are `{"ok":false,"error":"rule_mismatch","message":"..."}`.
 

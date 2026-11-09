@@ -412,13 +412,22 @@ impl Vault {
     /// Checks a backup (the newest by default) against the vault: decrypts it with the check
     /// key and compares every secret; with the recovery key, also proves the kit opens it.
     pub fn verify_backup(&self, file: Option<PathBuf>, recovery: Option<SecretValue>) -> Result<VerifyReport, VaultError> {
-        let latest = backup::latest(Path::new(&self.doc.backup_dir), &self.doc.vault_id);
-        let file = match file.or_else(|| latest.clone()) {
-            Some(file) => file,
-            None => return Err(VaultError::NoBackup),
+        // The newest backup comes from `serve`, the only program that touches the backup
+        // folder (R32); a file the person names is read directly.
+        let newest = file.is_none();
+        let (file, data) = match file {
+            Some(file) => {
+                let data = fs::read(&file)
+                    .map_err(|e| VaultError::BackupFailed(format!("can't read {}: {e}", file.display())))?;
+                (file, data)
+            }
+            None => {
+                let (file, data) = client::request_newest_backup(&self.paths)?;
+                (PathBuf::from(file), data)
+            }
         };
         let check = backup::parse_identity(&self.doc.check_identity)?;
-        let payload = backup::open(&file, &check)?;
+        let payload = backup::open_bytes(&data, &check)?;
         let matches_vault = payload.vault_id == self.doc.vault_id
             && payload.recovery_recipient == self.doc.recovery_recipient
             && same_records(&payload.records, &self.doc.records);
@@ -429,7 +438,7 @@ impl Vault {
                 drop(typed);
                 Some(match identity {
                     Ok(identity) => backup::public_of(&identity) == self.doc.recovery_recipient
-                        && backup::open(&file, &identity).is_ok(),
+                        && backup::open_bytes(&data, &identity).is_ok(),
                     Err(_) => false,
                 })
             }
@@ -447,7 +456,7 @@ impl Vault {
         ));
         let _ = self.audit(event);
         Ok(VerifyReport {
-            newest: latest.as_ref() == Some(&file),
+            newest,
             file,
             generation: payload.generation,
             written_at: payload.written_at,

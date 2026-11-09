@@ -499,8 +499,10 @@ fn verify_backup(paths: &Paths, file: Option<PathBuf>, with_recovery_key: bool) 
         println!("  recovery key: not checked (add --with-recovery-key)");
         return if check.matches_vault { Ok(()) } else { Err(VaultError::BackupMismatch) };
     }
-    println!("This reads the backup folder from this terminal. If it is in iCloud Drive and this");
-    println!("terminal app has never opened files there, macOS asks once; click Allow.");
+    if file.is_some() {
+        println!("This reads the file you named from this terminal. In iCloud Drive, Desktop, Documents");
+        println!("or Downloads, macOS may first ask whether this terminal app may access it.");
+    }
     let vault = Vault::open(paths)?;
     let recovery = if with_recovery_key {
         Some(read_hidden("Recovery key (AGE-SECRET-KEY-1...), hidden: ")?)
