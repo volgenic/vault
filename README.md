@@ -45,7 +45,8 @@ Linux version (systemd credentials, a TPM where present) replaces just that modu
   can't raise it.
 - **An audit log** (`audit.log` in the vault folder) records every request and command, refusals
   included, as hash-chained JSON lines: names, hosts, paths and outcomes, never a value, query or
-  body.
+  body. A use is written to the log before it happens; if the log can't be written, the vault
+  refuses the use (`audit_unavailable`).
 - **Hardening:** signed with the hardened runtime, no debugger attachment, no crash dumps, secret
   memory wiped after use. Secret values live in one type, `SecretValue`, that can't be printed,
   logged, cloned or serialized into a reply.
@@ -75,8 +76,8 @@ The `vault` tool can't print a secret, so it is safe for any agent on the Mac to
 | `vault audit [--all]` | The audit log, with its hash chain checked. |
 | `vault verify-backup [--with-recovery-key]` | Has `vault serve` decrypt the newest backup and compare it with the vault. With the recovery key, also proves the kit opens it: `vault serve` hands over the encrypted file and the check runs in your terminal, so the key never crosses the socket. |
 | `vault backup` | Has `vault serve` write (or re-check) the current backup now, e.g. after a failure. |
-| `vault reset` | Removes this Mac's vault (needs the recovery key, and a newest backup that opens with it). A vault whose kit was never confirmed holds nothing and goes without the key. |
-| `vault restore FILE` | Restores a backup into a fresh vault with the recovery key; new Secure Enclave key and vault key. Reads FILE from your terminal: in iCloud Drive, macOS may ask once whether the terminal may (a recovery step, not normal use). |
+| `vault reset` | Removes this Mac's vault (needs the recovery key, and a newest backup that opens with it and matches the vault). Keeps that backup in the vault folder as a restore point. A vault whose kit was never confirmed holds nothing and goes without the key. |
+| `vault restore [FILE]` | Restores into a fresh vault with the recovery key: the restore point `vault reset` kept, or a backup file you name (from another Mac, say; in iCloud Drive, macOS may ask once whether your terminal may read it). Makes a new Secure Enclave key, vault key and vault id, so the restored vault starts its own line of backups and older ones stay as they are. |
 | `vault install-agent` | Installs the LaunchAgent `com.volgenic.vault`, which runs `vault serve` at login. |
 | `vault serve` | The background part agents talk to. |
 

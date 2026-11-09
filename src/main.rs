@@ -94,8 +94,9 @@ enum Command {
     },
     /// Have `vault serve` write (or re-check) the current backup now, e.g. after a failure.
     Backup,
-    /// Restore a backup into a fresh vault on this Mac, with the recovery key.
-    Restore { file: PathBuf },
+    /// Restore a backup into a fresh vault on this Mac, with the recovery key. Without FILE,
+    /// restores the copy `vault reset` kept.
+    Restore { file: Option<PathBuf> },
     /// Remove this Mac's vault so a backup can be restored (needs the recovery key).
     Reset,
     /// Install and start the LaunchAgent that runs `vault serve` at login.
@@ -132,7 +133,7 @@ fn main() -> ExitCode {
         Command::Audit { all } => show_audit(&paths, all),
         Command::VerifyBackup { file, with_recovery_key } => verify_backup(&paths, file, with_recovery_key),
         Command::Backup => backup_now(&paths),
-        Command::Restore { file } => restore(&paths, &file),
+        Command::Restore { file } => restore(&paths, file.as_deref()),
         Command::Reset => reset(&paths),
         Command::InstallAgent => install_agent(&paths),
         Command::Serve => vault::server::serve(&paths),
@@ -537,11 +538,26 @@ fn backup_now(paths: &Paths) -> Result<(), VaultError> {
     if status.ok { Ok(()) } else { Err(VaultError::BackupFailed(status.detail)) }
 }
 
-fn restore(paths: &Paths, file: &Path) -> Result<(), VaultError> {
+fn restore(paths: &Paths, file: Option<&Path>) -> Result<(), VaultError> {
+    match file {
+        Some(_) => {
+            println!("This reads the file you named from this terminal. In iCloud Drive, Desktop, Documents");
+            println!("or Downloads, macOS may first ask whether this terminal app may access it.");
+        }
+        None if !ops::has_restore_point(paths) => {
+            return Err(VaultError::InvalidSecret(
+                "no restore point on this Mac; name a backup file: vault restore FILE".into(),
+            ));
+        }
+        None => println!("Restoring the backup `vault reset` kept in the vault folder."),
+    }
     let typed = read_hidden("Recovery key (AGE-SECRET-KEY-1...), hidden: ")?;
     let report = ops::restore(paths, file, typed)?;
-    println!("Restored vault {} from generation {}.", report.vault_id, report.from_generation);
-    println!("  new Secure Enclave key and new vault key made on this Mac");
+    println!(
+        "Restored as vault {} from vault {} generation {}.",
+        report.vault_id, report.from_vault_id, report.from_generation
+    );
+    println!("  new Secure Enclave key, vault key and vault id made on this Mac; older backups stay as they are");
     for secret in &report.secrets {
         println!("  {:<24} {:<8} {}", secret.name, secret.kind.label(), secret.site);
     }
@@ -572,8 +588,9 @@ fn reset(paths: &Paths) -> Result<(), VaultError> {
     }
     let typed = read_hidden("Recovery key (AGE-SECRET-KEY-1...), hidden: ")?;
     let newest = ops::reset(paths, typed)?;
-    println!("Vault removed from this Mac. Restore it with:");
-    println!("  vault restore {:?}", newest.display().to_string());
+    println!("Vault removed from this Mac. Its newest backup ({}) is kept in", newest.display());
+    println!("the vault folder as a restore point. Restore it with:");
+    println!("  vault restore");
     Ok(())
 }
 

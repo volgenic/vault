@@ -56,10 +56,13 @@ pub struct VerifyReport {
     pub matches_vault: bool,
     pub newest: bool,
     pub recovery_key_opens: Option<bool>,
+    /// The backup as it was checked: age ciphertext, safe to keep (R21).
+    pub ciphertext: Vec<u8>,
 }
 
 pub struct RestoreReport {
     pub vault_id: String,
+    pub from_vault_id: String,
     pub secrets: Vec<SecretSummary>,
     pub from_generation: u64,
 }
@@ -242,6 +245,13 @@ impl Vault {
         self.doc.kit_confirmed
     }
 
+    /// Re-reads the vault file under the change lock, so a change always starts from what is on
+    /// disk now, never from the copy read before a prompt (another change may have landed).
+    fn reload(&mut self) -> Result<(), VaultError> {
+        self.doc = store::load(&self.paths, &self.key)?;
+        Ok(())
+    }
+
     /// A vault that never held a secret: its kit isn't confirmed, so nothing could be stored.
     pub fn is_unused(&self) -> bool {
         !self.doc.kit_confirmed && self.doc.records.is_empty()
@@ -265,6 +275,7 @@ impl Vault {
     /// `vault init` and `vault restore` once `serve` runs, and by `vault backup` to retry.
     pub fn backup(&mut self) -> Result<BackupStatus, VaultError> {
         let _lock = store::lock_for_change(&self.paths)?;
+        self.reload()?;
         Ok(self.backup_now())
     }
 
@@ -317,6 +328,7 @@ impl Vault {
     /// Confirms the Recovery Kit with the recovery key the person typed back (R17).
     pub fn confirm_kit(&mut self, typed: SecretValue) -> Result<BackupStatus, VaultError> {
         let _lock = store::lock_for_change(&self.paths)?;
+        self.reload()?;
         if self.doc.kit_confirmed {
             return Err(VaultError::KitAlreadyConfirmed);
         }
@@ -346,6 +358,7 @@ impl Vault {
     /// Stores a new secret (R5, R7, R17, R27).
     pub fn add(&mut self, new: NewSecret) -> Result<(SecretSummary, BackupStatus), VaultError> {
         let _lock = store::lock_for_change(&self.paths)?;
+        self.reload()?;
         self.ready_for_change()?;
         model::validate_name(&new.name)?;
         model::validate_site(&new.site)?;
@@ -395,6 +408,7 @@ impl Vault {
     /// Deletes a secret. Earlier backup generations still hold it (R18).
     pub fn delete(&mut self, name: &str) -> Result<BackupStatus, VaultError> {
         let _lock = store::lock_for_change(&self.paths)?;
+        self.reload()?;
         self.ready_for_change()?;
         let before = self.doc.records.len();
         self.doc.records.retain(|record| record.name != name);
@@ -463,6 +477,7 @@ impl Vault {
             secrets: payload.records.len(),
             matches_vault,
             recovery_key_opens,
+            ciphertext: data,
         })
     }
 }
@@ -491,9 +506,28 @@ pub(crate) fn same_records(a: &[Record], b: &[Record]) -> bool {
         })
 }
 
-/// Restores a backup into a fresh vault on this Mac, with the recovery key (R20). Makes a new
-/// Secure Enclave key and a new vault key; the backup's folder becomes the backup folder.
-pub fn restore(paths: &Paths, file: &Path, typed: SecretValue) -> Result<RestoreReport, VaultError> {
+/// Where `vault reset` leaves a copy of the newest backup, in the vault folder, so `vault restore`
+/// can run without opening the backup folder from the terminal (R32).
+const RESTORE_POINT: &str = "restore-point.age";
+const RESTORE_POINT_INFO: &str = "restore-point.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RestorePointInfo {
+    backup_dir: String,
+    file: String,
+}
+
+/// Whether `vault reset` left a restore point on this Mac.
+pub fn has_restore_point(paths: &Paths) -> bool {
+    paths.dir.join(RESTORE_POINT).is_file()
+}
+
+/// Restores a backup into a fresh vault on this Mac, with the recovery key (R20). The backup is
+/// the file the person names, or the restore point `vault reset` left. Makes a new Secure
+/// Enclave key, a new vault key and a new vault id: the restored vault starts its own line of
+/// backups, so it never collides with the generations still in the folder, which stay as they
+/// are.
+pub fn restore(paths: &Paths, file: Option<&Path>, typed: SecretValue) -> Result<RestoreReport, VaultError> {
     check_auto_login()?;
     if !keyprotect::hardware_available() {
         return Err(VaultError::NoSecureEnclave);
@@ -503,24 +537,37 @@ pub fn restore(paths: &Paths, file: &Path, typed: SecretValue) -> Result<Restore
     if store::vault_exists(paths) || keyprotect::exists(&paths.dir) {
         return Err(VaultError::AlreadyInitialized);
     }
+    let (source, data, backup_dir) = match file {
+        Some(file) => {
+            let data = fs::read(file)
+                .map_err(|e| VaultError::BackupFailed(format!("can't read {}: {e}", file.display())))?;
+            let dir = file.parent().map(Path::to_path_buf).unwrap_or_else(|| paths.local_backups.clone());
+            (file.display().to_string(), data, dir)
+        }
+        None => {
+            let info: RestorePointInfo = fs::read(paths.dir.join(RESTORE_POINT_INFO))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .ok_or(VaultError::NoBackup)?;
+            let data = fs::read(paths.dir.join(RESTORE_POINT)).map_err(|_| VaultError::NoBackup)?;
+            (info.file, data, PathBuf::from(info.backup_dir))
+        }
+    };
     let identity = backup::parse_identity(&typed)?;
     drop(typed);
-    let payload = backup::open(file, &identity)?;
+    let payload = backup::open_bytes(&data, &identity)?;
     if payload.recovery_recipient != backup::public_of(&identity) {
         return Err(VaultError::WrongRecoveryKey);
     }
-    let backup_dir = file
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| paths.local_backups.clone());
     let (check_secret, _) = backup::new_identity();
+    let vault_id = store::new_vault_id()?;
     let key = SecretValue::random(32)?;
     keyprotect::store_new(&paths.dir, &key)?;
 
     let secrets = payload.records.iter().map(Record::summary).collect();
     let mut doc = VaultDoc {
         format: VAULT_FORMAT,
-        vault_id: payload.vault_id.clone(),
+        vault_id: vault_id.clone(),
         created_at: crate::now_rfc3339(),
         recovery_recipient: payload.recovery_recipient,
         kit_confirmed: true,
@@ -528,28 +575,35 @@ pub fn restore(paths: &Paths, file: &Path, typed: SecretValue) -> Result<Restore
         backup_dir: backup_dir.display().to_string(),
         check_identity: check_secret,
         audit_head: audit::GENESIS.into(),
-        generation: payload.generation + 1,
+        generation: 1,
         last_backup: None,
         records: payload.records,
     };
     let mut event = AuditEvent::new("restore", "ok");
     event.detail = Some(format!(
-        "from {} (generation {}), audit head then {}",
-        file.display(),
-        payload.generation,
-        payload.audit_head
+        "new vault {vault_id} from {source} (vault {}, generation {}), audit head then {}",
+        payload.vault_id, payload.generation, payload.audit_head
     ));
     doc.audit_head = audit_event(paths, event)?;
     store::save(paths, &key, &doc)?;
-    Ok(RestoreReport { vault_id: payload.vault_id, secrets, from_generation: payload.generation })
+    if file.is_none() {
+        let _ = fs::remove_file(paths.dir.join(RESTORE_POINT));
+        let _ = fs::remove_file(paths.dir.join(RESTORE_POINT_INFO));
+    }
+    Ok(RestoreReport {
+        vault_id,
+        from_vault_id: payload.vault_id,
+        secrets,
+        from_generation: payload.generation,
+    })
 }
 
 /// Removes this Mac's vault so a backup can be restored into a fresh one (R20). Needs the
 /// recovery key, and only goes ahead when the newest backup opens with it and matches the
 /// vault, so nothing is lost. Keeps the backups and the audit log.
 pub fn reset(paths: &Paths, typed: SecretValue) -> Result<PathBuf, VaultError> {
-    let vault = Vault::open(paths)?;
     let _lock = store::lock_for_change(paths)?;
+    let vault = Vault::open(paths)?;
     if vault.is_unused() {
         drop(typed);
         return remove_unused(paths, &vault);
@@ -566,8 +620,17 @@ pub fn reset(paths: &Paths, typed: SecretValue) -> Result<PathBuf, VaultError> {
         let _ = vault.audit(AuditEvent::new("reset", "denied: newest backup differs from vault"));
         return Err(VaultError::BackupMismatch);
     }
+    // A copy of the backup just proven, in the vault folder, so `vault restore` needs no
+    // access to the backup folder (R32). Ciphertext only.
+    store::write_atomic(&paths.dir.join(RESTORE_POINT), &report.ciphertext)?;
+    let info = RestorePointInfo { backup_dir: vault.doc.backup_dir.clone(), file: report.file.display().to_string() };
+    let info = serde_json::to_vec(&info).map_err(|_| VaultError::Io("restore point encoding".into()))?;
+    store::write_atomic(&paths.dir.join(RESTORE_POINT_INFO), &info)?;
     let mut event = AuditEvent::new("reset", "ok");
-    event.detail = Some(format!("vault removed (vault file and key.se); newest backup {}", report.file.display()));
+    event.detail = Some(format!(
+        "vault removed (vault file and key.se); newest backup {} kept as {RESTORE_POINT}",
+        report.file.display()
+    ));
     vault.audit(event)?;
     keyprotect::remove(&paths.dir)?;
     fs::remove_file(&paths.vault_file)?;
@@ -578,8 +641,8 @@ pub fn reset(paths: &Paths, typed: SecretValue) -> Result<PathBuf, VaultError> {
 /// stored (R17). This is how setup starts over, for example when the first backup to the
 /// chosen folder failed. Anyone who could do this could already read the unconfirmed kit.
 pub fn reset_unused(paths: &Paths) -> Result<(), VaultError> {
-    let vault = Vault::open(paths)?;
     let _lock = store::lock_for_change(paths)?;
+    let vault = Vault::open(paths)?;
     if !vault.is_unused() {
         return Err(VaultError::KitAlreadyConfirmed);
     }

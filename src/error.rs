@@ -38,6 +38,7 @@ pub enum VaultError {
     EchoBlocked,
     Busy,
     AuditChainBroken(usize),
+    AuditUnavailable,
 }
 
 impl VaultError {
@@ -78,6 +79,7 @@ impl VaultError {
             EchoBlocked => "echo_blocked",
             Busy => "busy",
             AuditChainBroken(_) => "audit_chain_broken",
+            AuditUnavailable => "audit_unavailable",
         }
     }
 }
@@ -129,6 +131,10 @@ impl fmt::Display for VaultError {
             EchoBlocked => write!(f, "the API's reply contained the key, so the vault withheld it"),
             Busy => write!(f, "the vault is busy; try again"),
             AuditChainBroken(line) => write!(f, "the audit log's hash chain breaks at line {line}"),
+            AuditUnavailable => write!(
+                f,
+                "the vault can't write its audit log, so it refuses every use until it can (R28)"
+            ),
         }
     }
 }

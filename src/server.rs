@@ -121,10 +121,21 @@ impl Server {
         Ok(doc)
     }
 
+    /// Best effort, for refusals and for lines after a use that is already recorded.
     fn audit(&self, event: AuditEvent) {
         if let Err(error) = audit::append(&self.paths.audit_log, event) {
             eprintln!("vault: couldn't write the audit log: {}", error.code());
         }
+    }
+
+    /// Records a use before it happens (R28). If the line can't be written, the use doesn't
+    /// happen: the caller gets `audit_unavailable`, and so does every later use until the log
+    /// can be written again.
+    fn record(&self, event: AuditEvent) -> Result<(), VaultError> {
+        audit::append(&self.paths.audit_log, event).map(|_| ()).map_err(|error| {
+            eprintln!("vault: couldn't write the audit log ({}); refusing the request", error.code());
+            VaultError::AuditUnavailable
+        })
     }
 
     fn handle(&self, mut stream: UnixStream) {
@@ -171,15 +182,15 @@ impl Server {
             }
         };
         let _ = match request {
-            Request::List => {
-                self.audit(with_peer(AuditEvent::new("list", "ok"), &peer));
-                reply(&mut stream, &ListReply { ok: true, secrets: doc.summaries() })
-            }
+            Request::List => match self.record(with_peer(AuditEvent::new("list", "ok"), &peer)) {
+                Ok(()) => reply(&mut stream, &ListReply { ok: true, secrets: doc.summaries() }),
+                Err(error) => reply(&mut stream, &ErrorReply::from(&error)),
+            },
             Request::Totp { name } => match vault::totp_code(&doc, &name) {
-                Ok(code) => {
-                    self.audit(with_peer(AuditEvent::named("totp", &name, "ok"), &peer));
-                    reply(&mut stream, &TotpReply { ok: true, name, code: code.code, seconds_left: code.seconds_left })
-                }
+                Ok(code) => match self.record(with_peer(AuditEvent::named("totp", &name, "ok"), &peer)) {
+                    Ok(()) => reply(&mut stream, &TotpReply { ok: true, name, code: code.code, seconds_left: code.seconds_left }),
+                    Err(error) => reply(&mut stream, &ErrorReply::from(&error)),
+                },
                 Err(error) => {
                     self.audit(with_peer(AuditEvent::named("totp", &name, &format!("denied: {}", error.code())), &peer));
                     reply(&mut stream, &ErrorReply::from(&error))
@@ -224,9 +235,13 @@ impl Server {
                     Ok((file, data)) => {
                         let mut event = AuditEvent::new("read-backup", "ok");
                         event.detail = Some(file.display().to_string());
-                        self.audit(with_peer(event, &peer));
-                        let data_base64 = BASE64.encode(data);
-                        reply(&mut stream, &ReadBackupReply { ok: true, file: file.display().to_string(), data_base64 })
+                        match self.record(with_peer(event, &peer)) {
+                            Ok(()) => {
+                                let data_base64 = BASE64.encode(data);
+                                reply(&mut stream, &ReadBackupReply { ok: true, file: file.display().to_string(), data_base64 })
+                            }
+                            Err(error) => reply(&mut stream, &ErrorReply::from(&error)),
+                        }
                     }
                     Err(error) => {
                         self.audit(with_peer(AuditEvent::new("read-backup", &format!("failed: {}", error.code())), &peer));
@@ -301,6 +316,10 @@ impl Server {
         if let Err(error) = proxy::check(rule, &request) {
             return Err(fail(error, event));
         }
+        // R28: the use is on disk before the key leaves the vault. No line, no request.
+        let mut attempt = event.clone();
+        attempt.outcome = "sending".into();
+        self.record(attempt)?;
         match proxy::send(&self.client, rule, &record.value, &request) {
             Ok(response) => {
                 event.outcome = "ok".into();
