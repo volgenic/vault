@@ -1,7 +1,43 @@
 [package]
 name = "vault"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0"
 description = "Volgenic's vault: keeps your agents' secrets on your own machine and lets agents use them without seeing them."
+build = "build.rs"
+
+[lib]
+name = "vault"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vault"
+path = "src/main.rs"
+
+[dependencies]
+age = "0.11"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+clap = { version = "4", features = ["derive"] }
+data-encoding = "2"
+getrandom = "0.2"
+hex = "0.4"
+hmac = "0.12"
+libc = "0.2"
+memchr = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+url = "2"
+zeroize = "1"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
