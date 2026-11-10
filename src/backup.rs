@@ -20,6 +20,25 @@ use crate::store;
 
 pub const KEEP_GENERATIONS: usize = 50;
 
+/// The largest backup file `vault restore FILE` accepts. It is sent after the request line as
+/// raw bytes, not inside it.
+pub const MAX_BACKUP_BYTES: usize = 32 * 1024 * 1024;
+
+/// The most a vault may hold, measured as an upper bound on its backup's plaintext. `add`
+/// refuses past this, so every backup the vault writes stays well under `MAX_BACKUP_BYTES`
+/// (age adds well under 1%) and can always be restored.
+pub const MAX_VAULT_PLAINTEXT: usize = 16 * 1024 * 1024;
+
+/// An upper bound on one record's size in a backup's JSON: a value byte is at most four
+/// characters there (`255,`), plus the names, site, rule and fixed fields.
+pub(crate) fn record_size_bound(record: &Record) -> usize {
+    1024 + 4 * record.value.len()
+        + 2 * (record.name.len()
+            + record.site.len()
+            + record.username.as_ref().map_or(0, String::len)
+            + record.rule.as_ref().map_or(0, |rule| rule.describe().len()))
+}
+
 #[derive(Serialize)]
 struct BackupPayloadRef<'a> {
     format: u32,

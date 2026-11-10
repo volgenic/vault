@@ -115,7 +115,7 @@ The `vault` tool can't print a secret, so it is safe for any agent on the Mac to
 | `vault verify-backup [--with-recovery-key]` | Has the daemon decrypt the newest backup and compare it with the vault. With the recovery key, also proves the kit opens it; that check runs in your terminal on ciphertext the daemon hands over. |
 | `vault backup` | Has the daemon write (or re-check) the current backup now, e.g. after a failure. |
 | `vault reset` | Removes this Mac's vault (needs the recovery key, and a newest backup that opens with it and matches the vault). Keeps that backup as a restore point. A vault whose kit was never confirmed holds nothing and goes without the key. |
-| `vault restore [FILE]` | Restores into an empty vault with the recovery key: the restore point, or a backup file you name. |
+| `vault restore [FILE]` | Restores into an empty vault with the recovery key: the restore point, or a backup file you name (sent to the daemon as raw bytes, up to 32 MiB). `vault add` refuses once a backup could pass 16 MiB, so every backup the vault writes can be restored. |
 
 ## For agents: the socket
 

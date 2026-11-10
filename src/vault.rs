@@ -361,6 +361,15 @@ impl Vault {
             Some(rule) => format!("{}; rule {}", record.kind.label(), rule.describe()),
             None => format!("{} for {}", record.kind.label(), record.site),
         });
+        let projected: usize =
+            self.doc.records.iter().map(backup::record_size_bound).sum::<usize>() + backup::record_size_bound(&record);
+        if projected > backup::MAX_VAULT_PLAINTEXT {
+            // Every backup must stay small enough for `vault restore FILE` to take back.
+            return Err(VaultError::InvalidSecret(format!(
+                "the vault is full: its backup would pass {} MiB, the most a restore takes",
+                backup::MAX_VAULT_PLAINTEXT / (1024 * 1024)
+            )));
+        }
         self.doc.records.push(record);
         let status = self.commit(event)?;
         Ok((summary, status))

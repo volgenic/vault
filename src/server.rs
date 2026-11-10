@@ -11,7 +11,7 @@
 //! backups (R32). Callers must be the owner's user ID or root (R22).
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -25,6 +25,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use zeroize::Zeroizing;
 
 use crate::audit::{self, AuditEvent};
+use crate::backup;
+use crate::secret::WipingBuf;
 use crate::error::VaultError;
 use crate::keyprotect::{self, SePublic};
 use crate::model::{Kind, MirrorState, VaultDoc};
@@ -186,6 +188,61 @@ fn open_waiting_for_login(paths: &Paths) -> Result<Vault, VaultError> {
     }
 }
 
+/// Reads one request line straight into a buffer that is wiped when dropped, through a chunk
+/// that is wiped too: no ordinary buffer ever holds a request, which may carry a typed value or
+/// the recovery key (R1, R27). Returns the line and any bytes read past it.
+fn read_request_line(stream: &mut UnixStream) -> Result<(WipingBuf, Vec<u8>), VaultError> {
+    let too_long = || VaultError::BadRequest("unreadable or over 2 MiB".into());
+    let mut data = WipingBuf::with_capacity(64 * 1024);
+    let mut chunk = Zeroizing::new(vec![0u8; 16 * 1024]);
+    loop {
+        let n = match stream.read(&mut chunk[..]) {
+            Ok(n) => n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(too_long()),
+        };
+        if n == 0 {
+            return Err(VaultError::BadRequest("the request ended without a newline".into()));
+        }
+        let start = data.len();
+        data.extend_from_slice(&chunk[..n]);
+        if let Some(index) = memchr::memchr(b'\n', &chunk[..n]) {
+            let end = start + index;
+            if end > protocol::MAX_REQUEST_LINE {
+                return Err(too_long());
+            }
+            let rest = data.as_slice()[end + 1..].to_vec();
+            let mut line = WipingBuf::with_capacity(end);
+            line.extend_from_slice(&data.as_slice()[..end]);
+            return Ok((line, rest));
+        }
+        if data.len() > protocol::MAX_REQUEST_LINE {
+            return Err(too_long());
+        }
+    }
+}
+
+/// Reads the backup file that follows a `restore` request line: exactly `len` bytes, at most
+/// `backup::MAX_BACKUP_BYTES`. Ciphertext, so an ordinary buffer is fine.
+fn read_payload(stream: &mut UnixStream, mut data: Vec<u8>, len: usize) -> Result<Vec<u8>, VaultError> {
+    if len > backup::MAX_BACKUP_BYTES {
+        return Err(VaultError::BadRequest(format!(
+            "the backup is over {} MiB, larger than any backup the vault writes",
+            backup::MAX_BACKUP_BYTES / (1024 * 1024)
+        )));
+    }
+    if data.len() > len {
+        return Err(VaultError::BadRequest("more bytes than backup_len".into()));
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    let have = data.len();
+    data.resize(len, 0);
+    stream
+        .read_exact(&mut data[have..])
+        .map_err(|_| VaultError::BadRequest("the backup ended before backup_len bytes".into()))?;
+    Ok(data)
+}
+
 fn reply<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(value).unwrap_or_else(|_| b"{\"ok\":false,\"error\":\"encoding\"}".to_vec());
     line.push(b'\n');
@@ -276,17 +333,15 @@ impl Server {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
 
-        // Requests may carry a typed value or the recovery key (R27): the line is wiped after
-        // parsing, and sized up front so it isn't reallocated for those (R1).
-        let mut line = Zeroizing::new(Vec::with_capacity(256 * 1024));
-        let read = BufReader::new((&stream).take(protocol::MAX_REQUEST_LINE as u64 + 1)).read_until(b'\n', &mut line);
-        if read.is_err() || line.len() > protocol::MAX_REQUEST_LINE {
-            let error = VaultError::BadRequest("unreadable or over 2 MiB".into());
-            self.audit(with_peer(AuditEvent::new("request", &format!("denied: {}", error.code())), &peer));
-            let _ = error_reply(&mut stream, &error);
-            return;
-        }
-        let request: Request = match serde_json::from_slice(&line) {
+        let (line, rest) = match read_request_line(&mut stream) {
+            Ok(read) => read,
+            Err(error) => {
+                self.audit(with_peer(AuditEvent::new("request", &format!("denied: {}", error.code())), &peer));
+                let _ = error_reply(&mut stream, &error);
+                return;
+            }
+        };
+        let request: Request = match serde_json::from_slice(line.as_slice()) {
             Ok(request) => request,
             Err(_) => {
                 let error = VaultError::BadRequest("not a valid request; see the protocol in the README".into());
@@ -296,10 +351,28 @@ impl Server {
             }
         };
         drop(line);
-        let _ = self.dispatch(&mut stream, &peer, request);
+        // `restore FILE` sends the backup's bytes after the line (ciphertext only).
+        let payload = match &request {
+            Request::Restore { backup_len: Some(len), .. } => match read_payload(&mut stream, rest, *len) {
+                Ok(data) => Some(data),
+                Err(error) => {
+                    self.audit(with_peer(AuditEvent::new("restore", &format!("denied: {}", error.code())), &peer));
+                    let _ = error_reply(&mut stream, &error);
+                    return;
+                }
+            },
+            _ => None,
+        };
+        let _ = self.dispatch(&mut stream, &peer, request, payload);
     }
 
-    fn dispatch(&self, stream: &mut UnixStream, peer: &Peer, request: Request) -> std::io::Result<()> {
+    fn dispatch(
+        &self,
+        stream: &mut UnixStream,
+        peer: &Peer,
+        request: Request,
+        payload: Option<Vec<u8>>,
+    ) -> std::io::Result<()> {
         match request {
             Request::List => {
                 let result = self.snapshot().and_then(|doc| {
@@ -401,17 +474,9 @@ impl Server {
                 })();
                 self.finish(stream, peer, "reset", None, result)
             }
-            Request::Restore { recovery_key, backup_base64, source } => {
+            Request::Restore { recovery_key, backup_len: _, source } => {
                 let result = (|| {
-                    let file = match backup_base64 {
-                        Some(encoded) => {
-                            let data = BASE64
-                                .decode(encoded)
-                                .map_err(|_| VaultError::BadRequest("backup_base64 isn't base64".into()))?;
-                            Some((source.unwrap_or_else(|| "a file the person named".into()), data))
-                        }
-                        None => None,
-                    };
+                    let file = payload.map(|data| (source.unwrap_or_else(|| "a file the person named".into()), data));
                     let mut guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
                     if guard.is_some() {
                         return Err(VaultError::AlreadyInitialized);

@@ -18,6 +18,8 @@
 //!
 //! For the owner's mirror agent (R32): mirror-plan, mirror-report.
 //!
+//! `restore` with a file sends the file's bytes right after its request line, as they are.
+//!
 //! `add`, `confirm-kit`, `reset` and `restore` carry a typed value or the recovery key. The
 //! command-line tool sends them only after checking that the socket and the process behind it
 //! belong to the vault's own account (R22, R27).
@@ -96,10 +98,11 @@ pub enum Request {
     Restore {
         #[serde(deserialize_with = "secret_bytes::deserialize")]
         recovery_key: SecretValue,
-        /// A backup file the person named (`vault restore FILE`); without it, the restore
-        /// point `vault reset` kept.
+        /// The size of a backup file the person named (`vault restore FILE`). Its bytes follow
+        /// the request line as they are, up to `backup::MAX_BACKUP_BYTES`. Without it, the
+        /// restore point `vault reset` kept.
         #[serde(default)]
-        backup_base64: Option<String>,
+        backup_len: Option<usize>,
         #[serde(default)]
         source: Option<String>,
     },
@@ -147,7 +150,7 @@ pub(crate) enum SecretRequest<'a> {
     Restore {
         #[serde(serialize_with = "secret_bytes::serialize_ref")]
         recovery_key: &'a SecretValue,
-        backup_base64: Option<String>,
+        backup_len: Option<usize>,
         source: Option<String>,
     },
 }

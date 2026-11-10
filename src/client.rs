@@ -59,12 +59,15 @@ fn connect_verified(paths: &Paths) -> Result<UnixStream, VaultError> {
     Ok(stream)
 }
 
-fn exchange(paths: &Paths, request: &[u8], wait: Duration) -> Result<Vec<u8>, VaultError> {
+fn exchange(paths: &Paths, request: &[u8], payload: Option<&[u8]>, wait: Duration) -> Result<Vec<u8>, VaultError> {
     let mut stream = connect_verified(paths)?;
     stream.set_read_timeout(Some(wait))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(60)))?;
     stream.write_all(request)?;
     stream.write_all(b"\n")?;
+    if let Some(payload) = payload {
+        stream.write_all(payload)?;
+    }
     stream.flush()?;
     let mut line = Vec::new();
     BufReader::new(&stream).read_until(b'\n', &mut line)?;
@@ -85,7 +88,7 @@ fn parse<T: DeserializeOwned>(line: &[u8]) -> Result<T, VaultError> {
 
 fn call<T: DeserializeOwned>(paths: &Paths, request: serde_json::Value, wait: Duration) -> Result<T, VaultError> {
     let bytes = serde_json::to_vec(&request).map_err(|_| VaultError::Io("request encoding".into()))?;
-    parse(&exchange(paths, &bytes, wait)?)
+    parse(&exchange(paths, &bytes, None, wait)?)
 }
 
 /// Sends a request that carries a secret. The buffer is sized up front so it isn't reallocated,
@@ -93,12 +96,12 @@ fn call<T: DeserializeOwned>(paths: &Paths, request: serde_json::Value, wait: Du
 fn call_secret<T: DeserializeOwned>(
     paths: &Paths,
     request: &SecretRequest<'_>,
-    extra: usize,
+    payload: Option<&[u8]>,
     wait: Duration,
 ) -> Result<T, VaultError> {
-    let mut bytes = Zeroizing::new(Vec::with_capacity(128 * 1024 + extra));
+    let mut bytes = Zeroizing::new(Vec::with_capacity(128 * 1024));
     serde_json::to_writer(&mut *bytes, request).map_err(|_| VaultError::Io("request encoding".into()))?;
-    parse(&exchange(paths, &bytes, wait)?)
+    parse(&exchange(paths, &bytes, payload, wait)?)
 }
 
 pub fn status(paths: &Paths) -> Result<StatusReply, VaultError> {
@@ -123,7 +126,7 @@ pub fn add(
     value: &SecretValue,
 ) -> Result<AddReply, VaultError> {
     let request = SecretRequest::Add { name, kind, site, rule, username, value };
-    call_secret(paths, &request, 0, CHANGE_WAIT)
+    call_secret(paths, &request, None, CHANGE_WAIT)
 }
 
 pub fn delete(paths: &Paths, name: &str) -> Result<BackupReply, VaultError> {
@@ -131,26 +134,32 @@ pub fn delete(paths: &Paths, name: &str) -> Result<BackupReply, VaultError> {
 }
 
 pub fn confirm_kit(paths: &Paths, recovery_key: &SecretValue) -> Result<ConfirmKitReply, VaultError> {
-    call_secret(paths, &SecretRequest::ConfirmKit { recovery_key }, 0, CHANGE_WAIT)
+    call_secret(paths, &SecretRequest::ConfirmKit { recovery_key }, None, CHANGE_WAIT)
 }
 
 pub fn reset(paths: &Paths, recovery_key: Option<&SecretValue>) -> Result<ResetReply, VaultError> {
-    call_secret(paths, &SecretRequest::Reset { recovery_key }, 0, CHANGE_WAIT)
+    call_secret(paths, &SecretRequest::Reset { recovery_key }, None, CHANGE_WAIT)
 }
 
-/// Restores into an empty vault: from the restore point, or from a backup file's bytes.
+/// Restores into an empty vault: from the restore point, or from a backup file's bytes, which
+/// follow the request line as they are.
 pub fn restore(
     paths: &Paths,
     recovery_key: &SecretValue,
     file: Option<(String, Vec<u8>)>,
 ) -> Result<RestoreReply, VaultError> {
-    let (source, backup_base64) = match file {
-        Some((source, data)) => (Some(source), Some(BASE64.encode(data))),
+    let (source, data) = match file {
+        Some((source, data)) => (Some(source), Some(data)),
         None => (None, None),
     };
-    let extra = backup_base64.as_ref().map_or(0, String::len);
-    let request = SecretRequest::Restore { recovery_key, backup_base64, source };
-    call_secret(paths, &request, extra, CHANGE_WAIT)
+    if data.as_ref().is_some_and(|d| d.len() > backup::MAX_BACKUP_BYTES) {
+        return Err(VaultError::BackupFailed(format!(
+            "the file is over {} MiB, larger than any backup the vault writes",
+            backup::MAX_BACKUP_BYTES / (1024 * 1024)
+        )));
+    }
+    let request = SecretRequest::Restore { recovery_key, backup_len: data.as_ref().map(Vec::len), source };
+    call_secret(paths, &request, data.as_deref(), CHANGE_WAIT)
 }
 
 pub fn backup(paths: &Paths) -> Result<BackupReply, VaultError> {

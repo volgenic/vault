@@ -178,9 +178,34 @@ pub(crate) mod secret_bytes {
         serializer.serialize_bytes(value.expose())
     }
 
+    /// Reads the bytes into a `crate::secret::WipingBuf`, never a plain `Vec` that would leave unwiped copies
+    /// behind as it grows (R1).
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SecretValue, D::Error> {
-        let bytes = Vec::<u8>::deserialize(deserializer)?;
-        Ok(SecretValue::from_vec(bytes))
+        deserializer.deserialize_bytes(SecretVisitor)
+    }
+
+    struct SecretVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for SecretVisitor {
+        type Value = SecretValue;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a byte array")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<SecretValue, A::Error> {
+            let mut buf = crate::secret::WipingBuf::with_capacity(seq.size_hint().unwrap_or(0).clamp(64, 1 << 20));
+            while let Some(byte) = seq.next_element::<u8>()? {
+                buf.push(byte);
+            }
+            Ok(buf.into_secret())
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<SecretValue, E> {
+            let mut buf = crate::secret::WipingBuf::with_capacity(value.len());
+            buf.extend_from_slice(value);
+            Ok(buf.into_secret())
+        }
     }
 
     /// For a request field that borrows the value: the client's call site of `expose` in R1,
@@ -197,8 +222,13 @@ pub(crate) mod secret_bytes {
     }
 
     pub fn deserialize_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<SecretValue>, D::Error> {
-        let bytes = Option::<Vec<u8>>::deserialize(deserializer)?;
-        Ok(bytes.map(SecretValue::from_vec))
+        struct Wrapped(SecretValue);
+        impl<'de> Deserialize<'de> for Wrapped {
+            fn deserialize<D2: Deserializer<'de>>(deserializer: D2) -> Result<Self, D2::Error> {
+                super::secret_bytes::deserialize(deserializer).map(Wrapped)
+            }
+        }
+        Ok(Option::<Wrapped>::deserialize(deserializer)?.map(|wrapped| wrapped.0))
     }
 
     struct Bytes<'a>(&'a [u8]);
