@@ -203,9 +203,13 @@ impl Vault {
         Ok(())
     }
 
-    /// A vault that never held a secret: its kit isn't confirmed, so nothing could be stored.
+    /// A vault that never held a secret: no change since `vault install` made it (every add,
+    /// delete or kit confirmation raises the generation), and not restored from a backup (a
+    /// restored vault counts as confirmed). Only such a vault may be removed without the
+    /// recovery key, together with its kit; any other keeps its kit and needs the key, because
+    /// its backups may hold secrets only the kit opens.
     pub fn is_unused(&self) -> bool {
-        !self.doc.kit_confirmed && self.doc.records.is_empty()
+        self.doc.generation == 1 && !self.doc.kit_confirmed && self.doc.records.is_empty()
     }
 
     pub fn audit(&self, event: AuditEvent) -> Result<String, VaultError> {

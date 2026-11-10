@@ -530,8 +530,8 @@ fn restore(paths: &Paths, file: Option<PathBuf>) -> Result<(), VaultError> {
 fn reset(paths: &Paths) -> Result<(), VaultError> {
     let status = client::status(paths)?;
     let vault = status.vault.ok_or(VaultError::NotInitialized)?;
-    if !vault.kit_confirmed && vault.secrets == 0 {
-        println!("This vault never held a secret (its Recovery Kit isn't confirmed), so it can be");
+    if vault.generation == 1 && !vault.kit_confirmed && vault.secrets == 0 {
+        println!("This vault never held a secret (nothing has changed since it was made), so it can be");
         println!("removed without the recovery key. The kit file, if still there, is deleted too.");
         if !confirm("Remove it?")? {
             println!("Nothing changed.");

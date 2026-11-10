@@ -10,8 +10,13 @@ the command line, can carry a secret value.
 - Threat model, with the numbered rules (R1, R2, ...) every change is reviewed against:
   [Vault threat model](https://volgenic.com/pages/4171d207-a31e-4d38-b659-60ceed9ee5fd)
 
-**macOS only for now.** Deliberately simple: the bar is "better than plaintext secrets on a
-server", not an enterprise security system.
+**macOS only for now. Linux is planned:** the platform-neutral core is the library crate, and
+the vault key's storage sits in one small module (`src/keyprotect/`).
+
+Deliberately simple: the bar is "better than plaintext secrets on a server", not an enterprise
+security system. The vault keeps secrets out of agents' normal path (they use them without
+seeing them), not out of reach of code running as you: the key file and the vault file are
+yours. The threat model's "Current design" block says what that accepts.
 
 ## How it runs
 
