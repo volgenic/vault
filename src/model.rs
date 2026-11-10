@@ -38,7 +38,7 @@ impl Kind {
 }
 
 /// What a listing shows: name, kind and site, nothing else (the item's "list" contract).
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SecretSummary {
     pub name: String,
     pub kind: Kind,
@@ -91,7 +91,9 @@ pub(crate) struct VaultDoc {
     /// Where `init` wrote the kit, so `confirm-kit` can delete it.
     #[serde(default)]
     pub kit_path: Option<String>,
-    pub backup_dir: String,
+    /// Where `vault mirror` copies the backups (iCloud Drive by default). The daemon never opens
+    /// it; the owner's mirror agent asks the daemon for it (R15, R32).
+    pub mirror_dir: String,
     /// The check key: an age X25519 identity whose public half is the backups' second
     /// recipient, so the vault can decrypt each backup right after writing it (R18, R19).
     #[serde(with = "secret_bytes")]
@@ -129,6 +131,22 @@ pub(crate) struct BackupPayload {
     pub records: Vec<Record>,
 }
 
+/// What the owner's mirror agent last reported (R32). A status display, not proof: any program
+/// running as the owner could send one.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MirrorState {
+    /// When the daemon received the report.
+    pub at: String,
+    pub ok: bool,
+    pub mirror_dir: String,
+    /// The newest backup the mirror copied and checked, and its generation.
+    pub newest_file: Option<String>,
+    pub newest_generation: Option<u64>,
+    pub copied: usize,
+    pub already_there: usize,
+    pub detail: String,
+}
+
 /// Names are 1 to 64 characters: letters, digits, dot, dash and underscore.
 pub fn validate_name(name: &str) -> Result<(), VaultError> {
     let ok = !name.is_empty()
@@ -163,5 +181,31 @@ pub(crate) mod secret_bytes {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SecretValue, D::Error> {
         let bytes = Vec::<u8>::deserialize(deserializer)?;
         Ok(SecretValue::from_vec(bytes))
+    }
+
+    /// For a request field that borrows the value: the client's call site of `expose` in R1,
+    /// sending a typed value or recovery key to the verified daemon (R27).
+    pub fn serialize_ref<S: Serializer>(value: &&SecretValue, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(value.expose())
+    }
+
+    pub fn serialize_opt_ref<S: Serializer>(value: &Option<&SecretValue>, serializer: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(value) => serializer.serialize_some(&Bytes(value.expose())),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<SecretValue>, D::Error> {
+        let bytes = Option::<Vec<u8>>::deserialize(deserializer)?;
+        Ok(bytes.map(SecretValue::from_vec))
+    }
+
+    struct Bytes<'a>(&'a [u8]);
+
+    impl serde::Serialize for Bytes<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
     }
 }

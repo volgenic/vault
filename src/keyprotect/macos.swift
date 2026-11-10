@@ -8,7 +8,8 @@
 // - The vault key is wrapped to that key: an ephemeral P-256 key, ECDH, HKDF-SHA256, AES-GCM.
 // - The shim never touches the Keychain: no Keychain item means no Keychain dialog, ever, for
 //   any build (the owner's zero-prompt rule on the threat model page). Rust stores the handle
-//   and the wrapped key in the vault folder (src/keyprotect/macos.rs).
+//   in root's folder and the wrapped key in the vault folder (src/keyprotect/macos.rs). Only
+//   root calls `vkp_se_create` and `vkp_se_unwrap` (R14); `vkp_wrap` needs only the public key.
 //
 // Return codes: 0 ok, 1 output buffer too small, 2 Secure Enclave error, 6 bad input or crypto
 // failure.

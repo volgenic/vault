@@ -39,6 +39,12 @@ pub enum VaultError {
     Busy,
     AuditChainBroken(usize),
     AuditUnavailable,
+    NotInstalled,
+    NotRoot,
+    DaemonNotRunning,
+    DaemonNotVerified(String),
+    Daemon(String),
+    Unsigned(String),
 }
 
 impl VaultError {
@@ -80,6 +86,12 @@ impl VaultError {
             Busy => "busy",
             AuditChainBroken(_) => "audit_chain_broken",
             AuditUnavailable => "audit_unavailable",
+            NotInstalled => "not_installed",
+            NotRoot => "not_root",
+            DaemonNotRunning => "daemon_not_running",
+            DaemonNotVerified(_) => "daemon_not_verified",
+            Daemon(_) => "daemon_refused",
+            Unsigned(_) => "unsigned_build",
         }
     }
 }
@@ -93,7 +105,10 @@ impl fmt::Display for VaultError {
             KeyProtection => write!(f, "the protected vault key is damaged or can't be opened"),
             Random => write!(f, "the operating system's random number generator failed"),
             AlreadyInitialized => write!(f, "a vault already exists on this Mac"),
-            NotInitialized => write!(f, "no vault on this Mac yet; run `vault init`"),
+            NotInitialized => write!(
+                f,
+                "no vault on this Mac: install one with `sudo vault install-system`, or restore one with `vault restore`"
+            ),
             AutoLoginOn => write!(
                 f,
                 "macOS automatic login is on; turn it off in System Settings > Users & Groups first \
@@ -135,6 +150,16 @@ impl fmt::Display for VaultError {
                 f,
                 "the vault can't write its audit log, so it refuses every use until it can (R28)"
             ),
+            NotInstalled => write!(f, "the vault isn't installed on this Mac; run `sudo vault install-system`"),
+            NotRoot => write!(f, "this command must run as root: `sudo vault install-system`"),
+            DaemonNotRunning => write!(
+                f,
+                "the vault's daemon isn't answering. After a restart it waits for the first login; \
+                 otherwise see /Library/Logs/Volgenic/vault.log"
+            ),
+            DaemonNotVerified(why) => write!(f, "refusing to talk to the socket: {why}"),
+            Daemon(message) => write!(f, "{message}"),
+            Unsigned(why) => write!(f, "this build isn't signed as the vault: {why}"),
         }
     }
 }
