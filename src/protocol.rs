@@ -50,8 +50,8 @@ pub struct RuleInput {
     pub header: String,
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(tag = "op", rename_all = "kebab-case")]
+/// A request, as `parse_request` reads it.
+#[derive(Debug)]
 pub enum Request {
     List,
     Totp {
@@ -61,19 +61,92 @@ pub enum Request {
         name: String,
         method: String,
         path: String,
+        headers: BTreeMap<String, String>,
+        body: Option<String>,
+        body_base64: Option<String>,
+    },
+    Status,
+    Audit {
+        all: bool,
+    },
+    Add {
+        name: String,
+        kind: Kind,
+        site: String,
+        rule: Option<RuleInput>,
+        username: Option<String>,
+        value: SecretValue,
+    },
+    Delete {
+        name: String,
+    },
+    ConfirmKit {
+        recovery_key: SecretValue,
+    },
+    Reset {
+        recovery_key: Option<SecretValue>,
+    },
+    Restore {
+        recovery_key: SecretValue,
+        /// The size of a backup file the person named (`vault restore FILE`). Its bytes follow
+        /// the request line as they are, up to `backup::MAX_BACKUP_BYTES`. Without it, the
+        /// restore point `vault reset` kept.
+        backup_len: Option<usize>,
+        source: Option<String>,
+    },
+    Backup,
+    VerifyBackup,
+    ReadBackup,
+    MirrorPlan,
+    MirrorReport {
+        ok: bool,
+        newest_file: Option<String>,
+        newest_generation: Option<u64>,
+        copied: usize,
+        already_there: usize,
+        detail: String,
+    },
+}
+
+/// Parses one request line (R1). Serde's `#[serde(tag = "op")]` enums first copy every field
+/// into an intermediate buffer of their own, which nothing wipes, so a typed value or recovery
+/// key would be left behind in freed memory. Instead this reads `op` alone (skipping the other
+/// fields without keeping them), then deserializes the line again straight into that
+/// operation's own struct, whose secret fields go directly into wiping buffers.
+pub fn parse_request(line: &[u8]) -> Result<Request, serde_json::Error> {
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    struct Op {
+        op: String,
+    }
+
+    #[derive(Deserialize)]
+    struct Named {
+        name: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ProxyWire {
+        name: String,
+        method: String,
+        path: String,
         #[serde(default)]
         headers: BTreeMap<String, String>,
         #[serde(default)]
         body: Option<String>,
         #[serde(default)]
         body_base64: Option<String>,
-    },
-    Status,
-    Audit {
+    }
+
+    #[derive(Deserialize)]
+    struct AuditWire {
         #[serde(default)]
         all: bool,
-    },
-    Add {
+    }
+
+    #[derive(Deserialize)]
+    struct AddWire {
         name: String,
         kind: Kind,
         site: String,
@@ -83,34 +156,32 @@ pub enum Request {
         username: Option<String>,
         #[serde(deserialize_with = "secret_bytes::deserialize")]
         value: SecretValue,
-    },
-    Delete {
-        name: String,
-    },
-    ConfirmKit {
+    }
+
+    #[derive(Deserialize)]
+    struct ConfirmKitWire {
         #[serde(deserialize_with = "secret_bytes::deserialize")]
         recovery_key: SecretValue,
-    },
-    Reset {
+    }
+
+    #[derive(Deserialize)]
+    struct ResetWire {
         #[serde(default, deserialize_with = "secret_bytes::deserialize_opt")]
         recovery_key: Option<SecretValue>,
-    },
-    Restore {
+    }
+
+    #[derive(Deserialize)]
+    struct RestoreWire {
         #[serde(deserialize_with = "secret_bytes::deserialize")]
         recovery_key: SecretValue,
-        /// The size of a backup file the person named (`vault restore FILE`). Its bytes follow
-        /// the request line as they are, up to `backup::MAX_BACKUP_BYTES`. Without it, the
-        /// restore point `vault reset` kept.
         #[serde(default)]
         backup_len: Option<usize>,
         #[serde(default)]
         source: Option<String>,
-    },
-    Backup,
-    VerifyBackup,
-    ReadBackup,
-    MirrorPlan,
-    MirrorReport {
+    }
+
+    #[derive(Deserialize)]
+    struct MirrorReportWire {
         ok: bool,
         #[serde(default)]
         newest_file: Option<String>,
@@ -122,7 +193,53 @@ pub enum Request {
         already_there: usize,
         #[serde(default)]
         detail: String,
-    },
+    }
+
+    let op = serde_json::from_slice::<Op>(line)?.op;
+    Ok(match op.as_str() {
+        "list" => Request::List,
+        "status" => Request::Status,
+        "backup" => Request::Backup,
+        "verify-backup" => Request::VerifyBackup,
+        "read-backup" => Request::ReadBackup,
+        "mirror-plan" => Request::MirrorPlan,
+        "totp" => Request::Totp { name: serde_json::from_slice::<Named>(line)?.name },
+        "delete" => Request::Delete { name: serde_json::from_slice::<Named>(line)?.name },
+        "proxy" => {
+            let w: ProxyWire = serde_json::from_slice(line)?;
+            Request::Proxy {
+                name: w.name,
+                method: w.method,
+                path: w.path,
+                headers: w.headers,
+                body: w.body,
+                body_base64: w.body_base64,
+            }
+        }
+        "audit" => Request::Audit { all: serde_json::from_slice::<AuditWire>(line)?.all },
+        "add" => {
+            let w: AddWire = serde_json::from_slice(line)?;
+            Request::Add { name: w.name, kind: w.kind, site: w.site, rule: w.rule, username: w.username, value: w.value }
+        }
+        "confirm-kit" => Request::ConfirmKit { recovery_key: serde_json::from_slice::<ConfirmKitWire>(line)?.recovery_key },
+        "reset" => Request::Reset { recovery_key: serde_json::from_slice::<ResetWire>(line)?.recovery_key },
+        "restore" => {
+            let w: RestoreWire = serde_json::from_slice(line)?;
+            Request::Restore { recovery_key: w.recovery_key, backup_len: w.backup_len, source: w.source }
+        }
+        "mirror-report" => {
+            let w: MirrorReportWire = serde_json::from_slice(line)?;
+            Request::MirrorReport {
+                ok: w.ok,
+                newest_file: w.newest_file,
+                newest_generation: w.newest_generation,
+                copied: w.copied,
+                already_there: w.already_there,
+                detail: w.detail,
+            }
+        }
+        other => return Err(serde_json::Error::custom(format!("unknown op {other:?}"))),
+    })
 }
 
 /// The requests that carry a secret, as the command-line tool sends them. Built only in

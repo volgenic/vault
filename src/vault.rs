@@ -343,6 +343,7 @@ impl Vault {
             Kind::Login if new.username.as_deref().is_none_or(str::is_empty) => {
                 return Err(VaultError::InvalidSecret("a login needs a username".into()));
             }
+            Kind::Login => model::validate_username(new.username.as_deref().unwrap_or(""))?,
             _ => {}
         }
         let record = Record {
@@ -361,16 +362,21 @@ impl Vault {
             Some(rule) => format!("{}; rule {}", record.kind.label(), rule.describe()),
             None => format!("{} for {}", record.kind.label(), record.site),
         });
-        let projected: usize =
-            self.doc.records.iter().map(backup::record_size_bound).sum::<usize>() + backup::record_size_bound(&record);
-        if projected > backup::MAX_VAULT_PLAINTEXT {
-            // Every backup must stay small enough for `vault restore FILE` to take back.
-            return Err(VaultError::InvalidSecret(format!(
-                "the vault is full: its backup would pass {} MiB, the most a restore takes",
-                backup::MAX_VAULT_PLAINTEXT / (1024 * 1024)
-            )));
-        }
+        // Every backup must stay small enough for `vault restore FILE` to take back. Measured
+        // exactly, with the new record in place; 4 KiB covers what the next commit changes (the
+        // audit head, the generation, the timestamp).
         self.doc.records.push(record);
+        let measured = backup::plaintext_size(&self.doc, &self.doc.records);
+        if measured.as_ref().map_or(true, |size| size.saturating_add(4096) > backup::MAX_VAULT_PLAINTEXT) {
+            drop(self.doc.records.pop());
+            return Err(match measured {
+                Err(e) => e,
+                Ok(_) => VaultError::InvalidSecret(format!(
+                    "the vault is full: its backup would pass {} MiB, the most a restore takes",
+                    backup::MAX_VAULT_PLAINTEXT / (1024 * 1024)
+                )),
+            });
+        }
         let status = self.commit(event)?;
         Ok((summary, status))
     }

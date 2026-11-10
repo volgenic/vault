@@ -167,6 +167,18 @@ pub fn validate_site(site: &str) -> Result<(), VaultError> {
     }
 }
 
+/// Usernames are 1 to 256 printable characters.
+pub fn validate_username(username: &str) -> Result<(), VaultError> {
+    let ok = !username.is_empty()
+        && username.chars().count() <= 256
+        && username.chars().all(|c| !c.is_control() && c != '\u{7f}');
+    if ok {
+        Ok(())
+    } else {
+        Err(VaultError::InvalidSecret("the username must be 1 to 256 printable characters".into()))
+    }
+}
+
 /// Serializes a `SecretValue` as a byte array, only inside the encrypted vault file and backups.
 /// This is the vault-file and backup call site of `expose` in R1.
 pub(crate) mod secret_bytes {

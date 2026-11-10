@@ -24,19 +24,42 @@ pub const KEEP_GENERATIONS: usize = 50;
 /// raw bytes, not inside it.
 pub const MAX_BACKUP_BYTES: usize = 32 * 1024 * 1024;
 
-/// The most a vault may hold, measured as an upper bound on its backup's plaintext. `add`
-/// refuses past this, so every backup the vault writes stays well under `MAX_BACKUP_BYTES`
-/// (age adds well under 1%) and can always be restored.
+/// The most a vault may hold, measured as its backup's plaintext. `add` refuses past this, so
+/// every backup the vault writes stays well under `MAX_BACKUP_BYTES` (age adds well under 1%)
+/// and can always be restored.
 pub const MAX_VAULT_PLAINTEXT: usize = 16 * 1024 * 1024;
 
-/// An upper bound on one record's size in a backup's JSON: a value byte is at most four
-/// characters there (`255,`), plus the names, site, rule and fixed fields.
-pub(crate) fn record_size_bound(record: &Record) -> usize {
-    1024 + 4 * record.value.len()
-        + 2 * (record.name.len()
-            + record.site.len()
-            + record.username.as_ref().map_or(0, String::len)
-            + record.rule.as_ref().map_or(0, |rule| rule.describe().len()))
+/// A `Write` sink that only counts: the bytes pass through it and nothing is kept, so measuring
+/// a backup leaves no copy of a value behind (R1).
+struct ByteCounter(usize);
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The exact size of the plaintext a backup of `records` would hold, JSON escaping and all:
+/// the same payload `write_and_verify` encodes, with a timestamp of the same length, counted
+/// rather than built.
+pub(crate) fn plaintext_size(doc: &VaultDoc, records: &[Record]) -> Result<usize, VaultError> {
+    let payload = BackupPayloadRef {
+        format: VAULT_FORMAT,
+        vault_id: &doc.vault_id,
+        written_at: crate::now_rfc3339(),
+        generation: doc.generation.saturating_add(1),
+        recovery_recipient: &doc.recovery_recipient,
+        audit_head: &doc.audit_head,
+        records,
+    };
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, &payload).map_err(|_| VaultError::BackupFailed("encoding".into()))?;
+    Ok(counter.0)
 }
 
 #[derive(Serialize)]

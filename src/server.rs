@@ -341,7 +341,7 @@ impl Server {
                 return;
             }
         };
-        let request: Request = match serde_json::from_slice(line.as_slice()) {
+        let request: Request = match protocol::parse_request(line.as_slice()) {
             Ok(request) => request,
             Err(_) => {
                 let error = VaultError::BadRequest("not a valid request; see the protocol in the README".into());
