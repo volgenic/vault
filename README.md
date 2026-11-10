@@ -11,53 +11,90 @@ the command line, can carry a secret value.
   [Vault threat model](https://volgenic.com/pages/4171d207-a31e-4d38-b659-60ceed9ee5fd)
 
 **macOS only for now. Linux is planned:** the platform-neutral core is the library crate, and
-the only macOS-specific part, key protection, sits in one small module (`src/keyprotect/`), so a
-Linux version (systemd credentials, a TPM where present) replaces just that module.
+the only macOS-specific part, key protection, sits in one small module (`src/keyprotect/`).
 
-## How it protects keys on macOS
+## The vault runs as its own macOS account
 
-- **The vault key** is 32 random bytes that encrypt the vault file
-  (`~/Library/Application Support/Volgenic/vault/vault.bin`, XChaCha20-Poly1305). It is never
-  stored as it is.
-- **The Secure Enclave** wraps it. The vault makes a P-256 key inside this Mac's Secure Enclave,
-  usable unattended (no fingerprint) but only on this Mac, and wraps the vault key to it. A copy
-  of the vault's files on any other machine is useless.
-- **No Keychain, so no dialogs.** The Secure Enclave handle and the wrapped vault key live in
-  `key.se` in the vault folder (readable only by you). The vault never uses the Keychain, so no
-  setup step, rebuild or update raises a Keychain or password dialog. Opening the key needs this
-  Mac's Secure Enclave and, after a restart, your login: the Secure Enclave key is usable only
-  once you have logged in. That is also why the vault refuses to run while automatic login is on
-  (it would log the Mac in by itself, and it keeps the login password in `/etc/kcpassword`, easy
-  to reverse). FileVault isn't required; `vault status` reports it.
-- **The Recovery Kit comes first.** `vault init` makes a recovery key pair and writes the kit to
-  a file. The vault stores no secret until you confirm the kit by pasting the key back
-  (`vault confirm-kit`), which also deletes the file.
-- **Backups after every change**, to a folder you choose (iCloud Drive is suggested). Each is a
-  standard [age](https://age-encryption.org) file encrypted to your recovery key, never to a
-  password, plus a check key that lives only inside the vault, so the vault reads every backup
-  back and decrypts it right after writing it, and refuses further changes if that fails. Your kit
-  opens a backup anywhere, even without Volgenic: `age -d -i <file with the key> <backup>`.
-- **Only `vault serve` touches the backup folder.** iCloud Drive is a folder macOS guards: the
-  first program to open files there gets a "would like to access files" dialog. So the
-  command-line tool never reads or writes the backup folder itself; it asks `vault serve`. That
-  dialog then comes once, during `vault init`, for the vault itself, and macOS remembers the
-  answer for the vault's signature, which every build keeps. An agent running `vault delete`
-  can't raise it.
-- **An audit log** (`audit.log` in the vault folder) records every request and command, refusals
-  included, as hash-chained JSON lines: names, hosts, paths and outcomes, never a value, query or
-  body. A use is written to the log before it happens; if the log can't be written, the vault
-  refuses the use (`audit_unavailable`).
+Agents on your Mac run as you. If the vault's files were yours, any agent that runs its own code
+could read them and have the Secure Enclave open them. So the vault runs as its own hidden role
+account, `_volgenicvault`, and agents can reach its socket but not its files.
+
+| Part | Owner | Where | Mode |
+|---|---|---|---|
+| The program | root | `/Library/Application Support/Volgenic/bin/vault` | 0755 |
+| The daemon's job, `com.volgenic.vault` | root | `/Library/LaunchDaemons/com.volgenic.vault.plist` | 0644 |
+| Secure Enclave handle (`se-key`), `system.json` (the owner's user ID) | root | `/Library/Application Support/Volgenic/vault-root/` | 0700 |
+| Vault file, wrapped vault key (`vault.key`), audit log, restore point | `_volgenicvault` | `/Library/Application Support/Volgenic/vault/` | 0700 |
+| Local backups (ciphertext) | `_volgenicvault` | `/Library/Application Support/Volgenic/vault-backups/` | 0755, files 0644 |
+| The socket | `_volgenicvault` | `/Library/Application Support/Volgenic/socket/vault.sock` | 0666, caller checked |
+| The daemon's log | root | `/Library/Logs/Volgenic/vault.log` | 0644 |
+| The mirror's job, `com.volgenic.vault.mirror` | you | `~/Library/LaunchAgents/` | |
+| The mirror's copies | you | the mirror folder, iCloud Drive by default | |
+
+- **The daemon starts as root.** It reads the Secure Enclave key's public half, unwraps the vault
+  key with the Secure Enclave, then drops to `_volgenicvault` for good (`setgroups`, `setgid`,
+  `setuid`, and a check that root can't be regained) before it opens the socket. After a
+  restart the Secure Enclave key works only once someone has logged in, so until then the
+  daemon waits and retries.
+- **Only the daemon reads or changes the vault.** Every command (`add`, `delete`, `list`,
+  `status`, `audit`, `reset`, `restore`, ...) is a request on the socket.
+- **The socket is mode 0666; the daemon checks callers.** It accepts only your user ID (from
+  `system.json`) and root, so you don't have to join a group (which would need every running
+  program restarted). The command-line tool checks the other end too: the socket and its folder
+  must belong to `_volgenicvault`, and `getpeereid` must report that account. Only then does it
+  send a typed value or the recovery key.
+- **No Keychain, so no Keychain dialogs.** The Secure Enclave key is made by CryptoKit with its
+  default protection: no fingerprint, no password, this Mac only, usable after the first login.
+- **Backups after every change**, to the local folder, each a standard
+  [age](https://age-encryption.org) file encrypted to your recovery key (never a password) and
+  to a check key that lives only inside the vault. The daemon reads every backup back and
+  decrypts it right after writing it, and refuses further changes if that fails. Your kit opens
+  a backup anywhere, even without Volgenic: `age -d -i <file with the key> <backup>`.
+- **The mirror** is a LaunchAgent in your login (`vault mirror`, the same program). Whenever the
+  local folder changes, and hourly, it copies each backup to the mirror folder and checks every
+  copy byte for byte by SHA-256. It holds no key. It is the only program that opens iCloud
+  Drive, so macOS's one "would like to access files" dialog names the vault and comes once.
+- **An audit log** records every request and command, refusals included, as hash-chained JSON
+  lines: names, hosts, paths and outcomes, never a value, query or body. A use is written before
+  it happens; if the log can't be written, the vault refuses the use (`audit_unavailable`).
 - **Hardening:** signed with the hardened runtime, no debugger attachment, no crash dumps, secret
   memory wiped after use. Secret values live in one type, `SecretValue`, that can't be printed,
   logged, cloned or serialized into a reply.
 
-What it does not stop yet: any agent on the Mac can *use* any key within its rule and get any 2FA
-code, and can delete secrets (device-signed approvals come later). An agent that runs its own
-code as you can also read `key.se` and the vault file and ask this Mac's Secure Enclave to open
-them: on one macOS user account nothing separates the vault's files from yours. The fix is
-running the vault as its own macOS user, a planned next step. The vault can't yet tell the
-Volgenic host from an agent: both run as Homebrew's `node`. The threat model page says what each
-attacker can reach.
+What it does not stop yet: any agent on the Mac can *use* any key within its rule, get any 2FA
+code, and add, delete or swap secrets through the socket (device-signed approvals come later).
+An agent can also swap a build you are about to install with sudo, and sign it with the vault's
+certificate; `install-system` prints the commit and SHA-256 so you can check. The threat model
+page says what each attacker can reach.
+
+## Install, update, restore
+
+```sh
+cargo build --release
+codesign --force --sign "Volgenic Vault Local Signing" --options runtime \
+  --identifier com.volgenic.vault target/release/vault
+sudo target/release/vault install-system      # one Terminal password prompt
+vault install-mirror                           # as yourself; one iCloud Drive dialog
+vault confirm-kit
+```
+
+(`vault` here is the installed program, `/Library/Application Support/Volgenic/bin/vault`; add
+that folder to your `PATH` or use an alias.)
+
+- `install-system` refuses a build that isn't signed with "Volgenic Vault Local Signing" and the
+  hardened runtime. It prints the build's git commit and SHA-256 and asks before it changes
+  anything. It creates the role account with `dscl`, the folders, the program, the Secure
+  Enclave key, the vault and its Recovery Kit (written to your home folder as you, mode 0600),
+  and starts the daemon. It lists any passwordless sudo rules it finds: any one an agent can use
+  gives it root, and root opens the vault.
+- **An update** is the same `sudo .../vault install-system` with the new signed build: it
+  replaces the program and restarts the daemon, and keeps everything else. One Terminal
+  password prompt per update.
+- **Restore on this Mac** needs no sudo: `vault reset` (with the recovery key) keeps the newest
+  backup as a restore point, and `vault restore` brings it back with a new vault key wrapped to
+  the same Secure Enclave key.
+- **Restore on a new Mac:** `sudo vault install-system --for-restore`, then
+  `vault restore <backup file>`.
 
 ## Commands
 
@@ -65,29 +102,28 @@ The `vault` tool can't print a secret, so it is safe for any agent on the Mac to
 
 | Command | What it does |
 |---|---|
-| `vault init` | Sets up the vault: Secure Enclave key, Recovery Kit, backup folder. Refuses if a vault exists or automatic login is on. |
+| `sudo vault install-system [--for-restore]` | Installs or updates the vault (above). |
+| `vault install-mirror` | Installs the mirror agent in your login and waits for its first copy. |
 | `vault confirm-kit` | Paste the recovery key back; unlocks storing secrets and deletes the kit file. |
 | `vault add NAME --kind api-key --host HOST --method GET --path /v1 --header "Authorization: Bearer {key}"` | Adds an API key with its rule. The value is read at a hidden prompt (or from standard input with `--yes`). |
 | `vault add NAME --kind login --site SITE --username USER` | Adds a login. Stored and listed only, for now. |
 | `vault add NAME --kind 2fa --site SITE` | Adds a 2FA seed: base32, or an `otpauth://` link. |
 | `vault delete NAME` | Deletes a secret. Earlier backups keep it. |
 | `vault list` | Names, kinds and sites. |
-| `vault status` | Protected key, Secure Enclave, automatic login, FileVault, signature, kit, backups, audit chain. |
+| `vault status` | The installed program and its signature, the vault account, folder owners, the daemon, the kit, backups, the mirror, the audit chain. |
 | `vault audit [--all]` | The audit log, with its hash chain checked. |
-| `vault verify-backup [--with-recovery-key]` | Has `vault serve` decrypt the newest backup and compare it with the vault. With the recovery key, also proves the kit opens it: `vault serve` hands over the encrypted file and the check runs in your terminal, so the key never crosses the socket. |
-| `vault backup` | Has `vault serve` write (or re-check) the current backup now, e.g. after a failure. |
-| `vault reset` | Removes this Mac's vault (needs the recovery key, and a newest backup that opens with it and matches the vault). Keeps that backup in the vault folder as a restore point. A vault whose kit was never confirmed holds nothing and goes without the key. |
-| `vault restore [FILE]` | Restores into a fresh vault with the recovery key: the restore point `vault reset` kept, or a backup file you name (from another Mac, say; in iCloud Drive, macOS may ask once whether your terminal may read it). Makes a new Secure Enclave key, vault key and vault id, so the restored vault starts its own line of backups and older ones stay as they are. |
-| `vault install-agent` | Installs the LaunchAgent `com.volgenic.vault`, which runs `vault serve` at login. |
-| `vault serve` | The background part agents talk to. |
+| `vault verify-backup [--with-recovery-key]` | Has the daemon decrypt the newest backup and compare it with the vault. With the recovery key, also proves the kit opens it; that check runs in your terminal on ciphertext the daemon hands over. |
+| `vault backup` | Has the daemon write (or re-check) the current backup now, e.g. after a failure. |
+| `vault reset` | Removes this Mac's vault (needs the recovery key, and a newest backup that opens with it and matches the vault). Keeps that backup as a restore point. A vault whose kit was never confirmed holds nothing and goes without the key. |
+| `vault restore [FILE]` | Restores into an empty vault with the recovery key: the restore point, or a backup file you name (sent to the daemon as raw bytes, up to 32 MiB). `vault add` refuses once a backup could pass 16 MiB, so every backup the vault writes can be restored. |
 
 ## For agents: the socket
 
-`~/Library/Application Support/Volgenic/vault/vault.sock`, reachable only by this macOS user.
-Send one JSON line, read one JSON line back:
+`/Library/Application Support/Volgenic/socket/vault.sock`. Send one JSON line, read one JSON
+line back:
 
 ```sh
-S="$HOME/Library/Application Support/Volgenic/vault/vault.sock"
+S="/Library/Application Support/Volgenic/socket/vault.sock"
 echo '{"op":"list"}' | nc -U "$S"
 echo '{"op":"totp","name":"github-2fa"}' | nc -U "$S"
 echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U "$S"
@@ -100,28 +136,21 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   The key goes only into the header its rule names, only to the rule's host, method and path.
   Redirects come back to you unfollowed. A reply that contains the key is withheld
   (`echo_blocked`).
-- `backup`, `verify-backup` and `read-backup` are how the command-line tool has `vault serve`
-  write and check backups. They return file names, generations, times, counts and, for
-  `read-backup`, the newest backup's ciphertext (which only the recovery key or the vault opens). `backup` never writes a
-  second file for the same generation, so repeating it can't push older generations out.
+- The other requests (`status`, `audit`, `add`, `delete`, `confirm-kit`, `reset`, `restore`,
+  `backup`, `verify-backup`, `read-backup`, `mirror-plan`, `mirror-report`) are what the
+  command-line tool and the mirror send; `src/protocol.rs` lists them.
 - Errors are `{"ok":false,"error":"rule_mismatch","message":"..."}`.
 
 ## Build
 
 A Rust (Cargo) project. `build.rs` compiles the small Swift key-protection shim
 (`src/keyprotect/macos.swift`) with `xcrun swiftc`, so Xcode or the Command Line Tools must be
-installed.
+installed, and records the git commit that `install-system` prints.
 
 ```sh
 cargo build          # the gate
 cargo build --release
-codesign --force --sign "Volgenic Vault Local Signing" --options runtime \
-  --identifier com.volgenic.vault target/release/vault
 ```
-
-Every build is signed with the same self-signed certificate, with the hardened runtime. Because
-the vault keeps nothing in the Keychain, nothing depends on that signature staying the same: a
-rebuild or an update shows no dialog.
 
 ## Tests: none, as an experiment
 

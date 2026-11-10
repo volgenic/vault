@@ -20,6 +20,48 @@ use crate::store;
 
 pub const KEEP_GENERATIONS: usize = 50;
 
+/// The largest backup file `vault restore FILE` accepts. It is sent after the request line as
+/// raw bytes, not inside it.
+pub const MAX_BACKUP_BYTES: usize = 32 * 1024 * 1024;
+
+/// The most a vault may hold, measured as its backup's plaintext. `add` refuses past this, so
+/// every backup the vault writes stays well under `MAX_BACKUP_BYTES` (age adds well under 1%)
+/// and can always be restored.
+pub const MAX_VAULT_PLAINTEXT: usize = 16 * 1024 * 1024;
+
+/// A `Write` sink that only counts: the bytes pass through it and nothing is kept, so measuring
+/// a backup leaves no copy of a value behind (R1).
+struct ByteCounter(usize);
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The exact size of the plaintext a backup of `records` would hold, JSON escaping and all:
+/// the same payload `write_and_verify` encodes, with a timestamp of the same length, counted
+/// rather than built.
+pub(crate) fn plaintext_size(doc: &VaultDoc, records: &[Record]) -> Result<usize, VaultError> {
+    let payload = BackupPayloadRef {
+        format: VAULT_FORMAT,
+        vault_id: &doc.vault_id,
+        written_at: crate::now_rfc3339(),
+        generation: doc.generation.saturating_add(1),
+        recovery_recipient: &doc.recovery_recipient,
+        audit_head: &doc.audit_head,
+        records,
+    };
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, &payload).map_err(|_| VaultError::BackupFailed("encoding".into()))?;
+    Ok(counter.0)
+}
+
 #[derive(Serialize)]
 struct BackupPayloadRef<'a> {
     format: u32,
@@ -64,7 +106,7 @@ fn file_prefix(vault_id: &str) -> String {
 
 /// Makes the backup folder if it is missing, but only its last part: a folder whose parent
 /// doesn't exist (iCloud Drive turned off, a typo) is an error, never a new tree on this disk.
-fn ensure_backup_dir(dir: &Path) -> Result<(), VaultError> {
+pub fn ensure_backup_dir(dir: &Path) -> Result<(), VaultError> {
     if dir.is_dir() {
         return Ok(());
     }
@@ -90,11 +132,10 @@ fn written_for(dir: &Path, vault_id: &str, generation: u64) -> Option<PathBuf> {
 /// it is read back, decrypted and compared with the vault instead of written again, so asking
 /// twice can never push older generations out. Otherwise a new one is written, read back from
 /// disk, decrypted with the check key and compared byte for byte, and old generations pruned.
-/// Only `serve` calls this (R32).
-pub(crate) fn write_and_verify(doc: &VaultDoc) -> Result<BackupStatus, VaultError> {
-    let dir = PathBuf::from(&doc.backup_dir);
-    ensure_backup_dir(&dir)?;
-    if let Some(file) = written_for(&dir, &doc.vault_id, doc.generation) {
+/// Only the daemon calls this, on its own folder `vault-backups/` (R32).
+pub(crate) fn write_and_verify(doc: &VaultDoc, dir: &Path) -> Result<BackupStatus, VaultError> {
+    ensure_backup_dir(dir)?;
+    if let Some(file) = written_for(dir, &doc.vault_id, doc.generation) {
         let check = parse_identity(&doc.check_identity)
             .map_err(|_| VaultError::BackupFailed("the check key is malformed".into()))?;
         let payload = open(&file, &check)?;
@@ -141,14 +182,15 @@ pub(crate) fn write_and_verify(doc: &VaultDoc) -> Result<BackupStatus, VaultErro
 
     let stamp = written_at.replace([':', '-'], "");
     let file = dir.join(format!("{}{:06}-{}.age", file_prefix(&doc.vault_id), doc.generation, stamp));
-    store::write_atomic(&file, &sealed).map_err(|e| VaultError::BackupFailed(e.to_string()))?;
+    // 0644: ciphertext, readable by the owner's mirror agent (R32).
+    store::write_atomic_mode(&file, &sealed, 0o644).map_err(|e| VaultError::BackupFailed(e.to_string()))?;
 
     // Read it back from disk and decrypt it, exactly as a restore would, then compare.
     let reread = decrypt_file(&file, &check)?;
     if reread.as_slice() != plain.as_slice() {
         return Err(VaultError::BackupMismatch);
     }
-    prune(&dir, &doc.vault_id);
+    prune(dir, &doc.vault_id);
     Ok(BackupStatus {
         file: file.display().to_string(),
         at: written_at,
@@ -203,9 +245,9 @@ fn matches_doc(payload: &BackupPayload, doc: &VaultDoc) -> bool {
 }
 
 /// Decrypts the newest backup with the check key and compares it with the vault (R19). Only
-/// `serve` calls this (R32); `vault verify-backup` asks it over the socket.
-pub(crate) fn check_newest(doc: &VaultDoc) -> Result<BackupCheck, VaultError> {
-    let file = latest(Path::new(&doc.backup_dir), &doc.vault_id).ok_or(VaultError::NoBackup)?;
+/// the daemon calls this (R32); `vault verify-backup` asks it over the socket.
+pub(crate) fn check_newest(doc: &VaultDoc, dir: &Path) -> Result<BackupCheck, VaultError> {
+    let file = latest(dir, &doc.vault_id).ok_or(VaultError::NoBackup)?;
     let check = parse_identity(&doc.check_identity)?;
     let payload = open(&file, &check)?;
     Ok(BackupCheck {
@@ -217,9 +259,9 @@ pub(crate) fn check_newest(doc: &VaultDoc) -> Result<BackupCheck, VaultError> {
     })
 }
 
-/// The newest backup's path and encrypted bytes, for `serve`'s read-backup request (R32).
-pub(crate) fn read_newest(doc: &VaultDoc) -> Result<(PathBuf, Vec<u8>), VaultError> {
-    let file = latest(Path::new(&doc.backup_dir), &doc.vault_id).ok_or(VaultError::NoBackup)?;
+/// The newest backup's path and encrypted bytes, for the daemon's read-backup request (R32).
+pub(crate) fn read_newest(doc: &VaultDoc, dir: &Path) -> Result<(PathBuf, Vec<u8>), VaultError> {
+    let file = latest(dir, &doc.vault_id).ok_or(VaultError::NoBackup)?;
     let data = fs::read(&file).map_err(|e| VaultError::BackupFailed(format!("can't read {}: {e}", file.display())))?;
     Ok((file, data))
 }
@@ -248,8 +290,47 @@ pub fn latest(dir: &Path, vault_id: &str) -> Option<PathBuf> {
     list(dir, vault_id).pop()
 }
 
+/// Every backup file in `dir`, of any vault, oldest first (what the mirror copies).
+pub fn list_all(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("vault-backup-") && n.ends_with(".age"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// The vault id prefix in a backup's file name (`vault-backup-<8 hex>-...`).
+pub fn vault_prefix_of(file: &Path) -> Option<String> {
+    let name = file.file_name()?.to_str()?;
+    let rest = name.strip_prefix("vault-backup-")?;
+    Some(rest.split('-').next()?.to_string())
+}
+
+/// The generation in a backup's file name.
+pub fn generation_of(file: &Path) -> Option<u64> {
+    let name = file.file_name()?.to_str()?;
+    name.strip_prefix("vault-backup-")?.split('-').nth(1)?.parse().ok()
+}
+
+/// SHA-256 of a file, as hex (the mirror's byte-for-byte check).
+pub fn sha256_file(path: &Path) -> Result<String, VaultError> {
+    use sha2::{Digest, Sha256};
+    let data = fs::read(path).map_err(|e| VaultError::BackupFailed(format!("can't read {}: {e}", path.display())))?;
+    Ok(hex::encode(Sha256::digest(&data)))
+}
+
 /// Keeps the newest generations and deletes older ones, only files this vault wrote (R18).
-fn prune(dir: &Path, vault_id: &str) {
+pub fn prune(dir: &Path, vault_id: &str) {
     let files = list(dir, vault_id);
     if files.len() > KEEP_GENERATIONS {
         for old in &files[..files.len() - KEEP_GENERATIONS] {

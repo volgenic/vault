@@ -38,7 +38,7 @@ impl Kind {
 }
 
 /// What a listing shows: name, kind and site, nothing else (the item's "list" contract).
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SecretSummary {
     pub name: String,
     pub kind: Kind,
@@ -91,7 +91,9 @@ pub(crate) struct VaultDoc {
     /// Where `init` wrote the kit, so `confirm-kit` can delete it.
     #[serde(default)]
     pub kit_path: Option<String>,
-    pub backup_dir: String,
+    /// Where `vault mirror` copies the backups (iCloud Drive by default). The daemon never opens
+    /// it; the owner's mirror agent asks the daemon for it (R15, R32).
+    pub mirror_dir: String,
     /// The check key: an age X25519 identity whose public half is the backups' second
     /// recipient, so the vault can decrypt each backup right after writing it (R18, R19).
     #[serde(with = "secret_bytes")]
@@ -129,6 +131,22 @@ pub(crate) struct BackupPayload {
     pub records: Vec<Record>,
 }
 
+/// What the owner's mirror agent last reported (R32). A status display, not proof: any program
+/// running as the owner could send one.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MirrorState {
+    /// When the daemon received the report.
+    pub at: String,
+    pub ok: bool,
+    pub mirror_dir: String,
+    /// The newest backup the mirror copied and checked, and its generation.
+    pub newest_file: Option<String>,
+    pub newest_generation: Option<u64>,
+    pub copied: usize,
+    pub already_there: usize,
+    pub detail: String,
+}
+
 /// Names are 1 to 64 characters: letters, digits, dot, dash and underscore.
 pub fn validate_name(name: &str) -> Result<(), VaultError> {
     let ok = !name.is_empty()
@@ -149,6 +167,18 @@ pub fn validate_site(site: &str) -> Result<(), VaultError> {
     }
 }
 
+/// Usernames are 1 to 256 printable characters.
+pub fn validate_username(username: &str) -> Result<(), VaultError> {
+    let ok = !username.is_empty()
+        && username.chars().count() <= 256
+        && username.chars().all(|c| !c.is_control() && c != '\u{7f}');
+    if ok {
+        Ok(())
+    } else {
+        Err(VaultError::InvalidSecret("the username must be 1 to 256 printable characters".into()))
+    }
+}
+
 /// Serializes a `SecretValue` as a byte array, only inside the encrypted vault file and backups.
 /// This is the vault-file and backup call site of `expose` in R1.
 pub(crate) mod secret_bytes {
@@ -160,8 +190,64 @@ pub(crate) mod secret_bytes {
         serializer.serialize_bytes(value.expose())
     }
 
+    /// Reads the bytes into a `crate::secret::WipingBuf`, never a plain `Vec` that would leave unwiped copies
+    /// behind as it grows (R1).
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SecretValue, D::Error> {
-        let bytes = Vec::<u8>::deserialize(deserializer)?;
-        Ok(SecretValue::from_vec(bytes))
+        deserializer.deserialize_bytes(SecretVisitor)
+    }
+
+    struct SecretVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for SecretVisitor {
+        type Value = SecretValue;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a byte array")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<SecretValue, A::Error> {
+            let mut buf = crate::secret::WipingBuf::with_capacity(seq.size_hint().unwrap_or(0).clamp(64, 1 << 20));
+            while let Some(byte) = seq.next_element::<u8>()? {
+                buf.push(byte);
+            }
+            Ok(buf.into_secret())
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<SecretValue, E> {
+            let mut buf = crate::secret::WipingBuf::with_capacity(value.len());
+            buf.extend_from_slice(value);
+            Ok(buf.into_secret())
+        }
+    }
+
+    /// For a request field that borrows the value: the client's call site of `expose` in R1,
+    /// sending a typed value or recovery key to the verified daemon (R27).
+    pub fn serialize_ref<S: Serializer>(value: &&SecretValue, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(value.expose())
+    }
+
+    pub fn serialize_opt_ref<S: Serializer>(value: &Option<&SecretValue>, serializer: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(value) => serializer.serialize_some(&Bytes(value.expose())),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<SecretValue>, D::Error> {
+        struct Wrapped(SecretValue);
+        impl<'de> Deserialize<'de> for Wrapped {
+            fn deserialize<D2: Deserializer<'de>>(deserializer: D2) -> Result<Self, D2::Error> {
+                super::secret_bytes::deserialize(deserializer).map(Wrapped)
+            }
+        }
+        Ok(Option::<Wrapped>::deserialize(deserializer)?.map(|wrapped| wrapped.0))
+    }
+
+    struct Bytes<'a>(&'a [u8]);
+
+    impl serde::Serialize for Bytes<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
     }
 }

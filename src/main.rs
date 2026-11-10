@@ -1,22 +1,25 @@
-//! `vault`: the command-line tool and the background `serve` process, one binary.
+//! `vault`: the command-line tool, the daemon and the backup mirror, one binary.
 //!
-//! Any agent on this Mac can run this program, so no command prints a secret value (R26). It
-//! can't: `SecretValue::expose` is private to the library. Values are read at a hidden prompt
-//! or from standard input, never from arguments or the environment (R2).
+//! The vault runs as its own macOS account. Every command here except the two installers is a
+//! request to the daemon over its socket (R13, R26); this tool never reads the vault's files,
+//! and can't. Any agent on this Mac can run it, so no command prints a secret value: replies
+//! carry none (R4). Values are read at a hidden prompt or from standard input, never from
+//! arguments or the environment (R2).
 
 use std::io::{BufRead, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use vault::audit::{self, AuditEvent};
+use vault::client;
 use vault::error::VaultError;
-use vault::model::Kind;
-use vault::rules;
+use vault::install::{self, SystemOptions};
+use vault::model::{BackupStatus, Kind};
+use vault::platform;
+use vault::protocol::RuleInput;
 use vault::secret::SecretValue;
 use vault::store::{self, Paths};
-use vault::vault::{self as ops, InitOptions, NewSecret, Vault};
 
 #[derive(Parser)]
 #[command(name = "vault", version, about = "Volgenic's vault: agents use your secrets without seeing them.")]
@@ -27,14 +30,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Set up the vault on this Mac: Secure Enclave key, Recovery Kit, backup folder.
-    Init {
+    /// Install or update the vault (run with sudo): its own macOS account, the program, the
+    /// Secure Enclave key, the vault, its Recovery Kit and the daemon.
+    InstallSystem {
+        /// Install without making a vault, to restore one from a backup file next.
+        #[arg(long)]
+        for_restore: bool,
+        /// The vault's owner (default: the user who ran sudo).
+        #[arg(long)]
+        owner: Option<String>,
         /// Where to save the Recovery Kit (asked if left out).
         #[arg(long)]
         kit: Option<PathBuf>,
-        /// Folder for encrypted backups (asked if left out; iCloud Drive is suggested).
+        /// Where the mirror copies backups (asked if left out; iCloud Drive is suggested).
         #[arg(long)]
-        backup_dir: Option<PathBuf>,
+        mirror_dir: Option<PathBuf>,
+        /// Don't ask before going ahead.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Install the agent in your login that copies backups to the mirror folder (no sudo).
+    InstallMirror {
+        #[arg(long)]
+        yes: bool,
     },
     /// Confirm the Recovery Kit by pasting the recovery key back. Needed before any secret.
     ConfirmKit,
@@ -84,25 +102,25 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Check a backup (the newest by default) against the vault.
+    /// Have the daemon decrypt the newest backup and compare it with the vault.
     VerifyBackup {
-        #[arg(long)]
-        file: Option<PathBuf>,
         /// Also prove the Recovery Kit opens it (asks for the recovery key, hidden).
         #[arg(long)]
         with_recovery_key: bool,
     },
-    /// Have `vault serve` write (or re-check) the current backup now, e.g. after a failure.
+    /// Have the daemon write (or re-check) the current backup now, e.g. after a failure.
     Backup,
-    /// Restore a backup into a fresh vault on this Mac, with the recovery key. Without FILE,
+    /// Restore a backup into an empty vault on this Mac, with the recovery key. Without FILE,
     /// restores the copy `vault reset` kept.
     Restore { file: Option<PathBuf> },
     /// Remove this Mac's vault so a backup can be restored (needs the recovery key).
     Reset,
-    /// Install and start the LaunchAgent that runs `vault serve` at login.
-    InstallAgent,
-    /// Serve agents on the local socket (run by the LaunchAgent).
-    Serve,
+    /// The vault's background part (run by launchd as root; drops to the vault's account).
+    #[command(hide = true)]
+    Daemon,
+    /// Copy backups to the mirror folder (run by the owner's LaunchAgent).
+    #[command(hide = true)]
+    Mirror,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -115,14 +133,14 @@ enum KindArg {
 }
 
 fn main() -> ExitCode {
-    vault::platform::harden_process();
+    platform::harden_process();
     let cli = Cli::parse();
-    let paths = match Paths::for_current_user() {
-        Ok(paths) => paths,
-        Err(error) => return fail(&error),
-    };
+    let paths = Paths::system();
     let result = match cli.command {
-        Command::Init { kit, backup_dir } => init(&paths, kit, backup_dir),
+        Command::InstallSystem { for_restore, owner, kit, mirror_dir, yes } => {
+            install::install_system(SystemOptions { for_restore, owner, kit, mirror_dir, yes })
+        }
+        Command::InstallMirror { yes } => install::install_mirror(yes),
         Command::ConfirmKit => confirm_kit(&paths),
         Command::Add { name, kind, site, host, port, methods, path, header, username, yes } => {
             add(&paths, name, kind, site, host, port, methods, path, header, username, yes)
@@ -131,12 +149,12 @@ fn main() -> ExitCode {
         Command::List => list(&paths),
         Command::Status => status(&paths),
         Command::Audit { all } => show_audit(&paths, all),
-        Command::VerifyBackup { file, with_recovery_key } => verify_backup(&paths, file, with_recovery_key),
+        Command::VerifyBackup { with_recovery_key } => verify_backup(&paths, with_recovery_key),
         Command::Backup => backup_now(&paths),
-        Command::Restore { file } => restore(&paths, file.as_deref()),
+        Command::Restore { file } => restore(&paths, file),
         Command::Reset => reset(&paths),
-        Command::InstallAgent => install_agent(&paths),
-        Command::Serve => vault::server::serve(&paths),
+        Command::Daemon => vault::server::run(),
+        Command::Mirror => vault::mirror::run(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -149,7 +167,7 @@ fn fail(error: &VaultError) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Reads a line the person types, shown as they type it (paths, yes/no).
+/// Reads a line the person types, shown as they type it (yes/no).
 fn ask(prompt: &str) -> Result<String, VaultError> {
     print!("{prompt}");
     std::io::stdout().flush()?;
@@ -178,120 +196,39 @@ fn read_hidden(prompt: &str) -> Result<SecretValue, VaultError> {
     }
 }
 
-fn expand_home(paths: &Paths, text: &str) -> PathBuf {
-    match text.strip_prefix("~/") {
-        Some(rest) => paths.home.join(rest),
-        None if text == "~" => paths.home.clone(),
-        None => PathBuf::from(text),
-    }
-}
-
-fn init(paths: &Paths, kit: Option<PathBuf>, backup_dir: Option<PathBuf>) -> Result<(), VaultError> {
-    println!("Setting up Volgenic's vault on this Mac.\n");
-    // The kit's default home is the vault folder: outside Desktop, Documents and Downloads,
-    // so writing it can't raise a macOS file-access dialog.
-    let default_kit = paths.dir.join("Volgenic Vault Recovery Kit.txt");
-    let kit_path = match kit {
-        Some(path) => path,
-        None => {
-            println!("The Recovery Kit holds the key that opens your backups. Print it or save it in");
-            println!("your password manager, then confirm it; the vault deletes the file after that.");
-            println!("Keep the default: on the Desktop or in Documents or Downloads, macOS may first ask");
-            println!("whether Terminal may access that folder.");
-            let answer = ask(&format!("Save the Recovery Kit to [{}]: ", default_kit.display()))?;
-            if answer.is_empty() { default_kit } else { expand_home(paths, &answer) }
-        }
-    };
-    let suggested = paths.icloud_backups();
-    let backup_dir = match backup_dir {
-        Some(path) => path,
-        None => {
-            println!();
-            println!("Backups are encrypted to your recovery key and written after every change.");
-            println!("Keep them off this Mac's disk so a lost or stolen Mac doesn't take them along.");
-            println!("Suggested: iCloud Drive (Apple stores only ciphertext; Volgenic stores nothing).");
-            let answer = ask(&format!("Backup folder [{}]: ", suggested.display()))?;
-            if answer.is_empty() { suggested } else { expand_home(paths, &answer) }
-        }
-    };
-    println!();
-    let report = ops::init(paths, &InitOptions { kit_path, backup_dir })?;
-    println!("Vault created: {}", report.vault_id);
-    println!("  vault key:        wrapped by this Mac's Secure Enclave (key.se in the vault folder)");
-    println!("  Recovery Kit:     {}", report.kit_path.display());
-    println!("  recovery key:     fingerprint {}", report.recovery_fingerprint);
-    println!("  backups:          {}", report.backup_dir.display());
-    println!();
-    println!("Next the vault starts its background part, `vault serve`, and has it write the first");
-    println!("backup. Only `vault serve` ever touches the backup folder. What macOS may show:");
-    println!("  - A notification, \"Background Items Added\": a login item was added. Nothing to click.");
-    println!("  - Once, if the backup folder is in iCloud Drive (or Desktop, Documents, Downloads or");
-    println!("    an external disk): a dialog asking whether \"vault\" may access files there.");
-    println!("    Click Allow. macOS remembers it for this program's signature, which stays the same");
-    println!("    across updates, so it doesn't ask again.");
-    println!("That dialog is the only one the vault can cause. It never uses the Keychain, so no");
-    println!("Keychain or password dialog appears, now or after an update.");
-    ask("Press Return to continue. ")?;
-    install_agent(paths)?;
-    let backup = first_backup(paths)?;
-    print_backup(&backup);
-    if !backup.ok {
-        println!();
-        println!("The vault holds nothing yet, so starting over is free: `vault reset` removes this");
-        println!("unused vault without the recovery key; then run `vault init` with another folder.");
-        return Err(VaultError::BackupFailed(backup.detail));
-    }
-    println!();
-    println!("Next: open the kit (open -e {:?}),", report.kit_path.display().to_string());
-    println!("print it or save the key in your password manager, then run");
-    println!("  vault confirm-kit");
-    println!("The vault stores no secret until the kit is confirmed.");
-    Ok(())
-}
-
-/// Waits for `serve` to answer, then has it write and verify a backup (R32).
-fn first_backup(paths: &Paths) -> Result<vault::model::BackupStatus, VaultError> {
-    if !vault::client::wait_for_serve(paths, std::time::Duration::from_secs(30)) {
-        return Err(VaultError::BackupFailed(format!(
-            "`vault serve` didn't start; its log is {}",
-            paths.log_file.display()
-        )));
-    }
-    println!("Writing the first backup (if macOS asks about file access for \"vault\", click Allow)...");
-    Vault::open(paths)?.backup()
-}
-
-/// Starts `serve` again so it loads a vault made by `restore`.
-fn restart_serve(paths: &Paths) -> Result<(), VaultError> {
-    if !paths.launch_agent.exists() {
-        return install_agent(paths);
-    }
-    let target = format!("gui/{}/com.volgenic.vault", unsafe { libc::getuid() });
-    let out = std::process::Command::new("/bin/launchctl").args(["kickstart", "-k", &target]).output()?;
-    if !out.status.success() {
-        return install_agent(paths);
-    }
-    Ok(())
-}
-
-fn print_backup(status: &vault::model::BackupStatus) {
+fn print_backup(status: &BackupStatus) {
     if status.ok {
-        println!("  backup:           generation {} OK ({}, by vault serve)", status.generation, status.detail);
+        println!("  backup:           generation {} OK ({}, by the daemon)", status.generation, status.detail);
         println!("                    {}", status.file);
     } else {
         println!("  backup:           FAILED: {}", status.detail);
     }
 }
 
+/// Deletes the kit file `install-system` wrote in the owner's home. The daemon's account can't
+/// touch the owner's files, so the command-line tool does it after the daemon confirms.
+fn delete_kit(kit: Option<&str>) {
+    match kit {
+        Some(kit) => match vault::vault::wipe_file(std::path::Path::new(kit)) {
+            Ok(()) => println!("  kit file deleted: {kit}"),
+            Err(error) => println!("  couldn't delete the kit file {kit}: {error}. Delete it yourself."),
+        },
+        None => {}
+    }
+}
+
 fn confirm_kit(paths: &Paths) -> Result<(), VaultError> {
-    let mut vault = Vault::open(paths)?;
-    if vault.kit_confirmed() {
+    let status = client::status(paths)?;
+    let vault = status.vault.ok_or(VaultError::NotInitialized)?;
+    if vault.kit_confirmed {
         return Err(VaultError::KitAlreadyConfirmed);
     }
     let typed = read_hidden("Paste the recovery key from the kit (AGE-SECRET-KEY-1...), hidden: ")?;
-    let status = vault.confirm_kit(typed)?;
-    println!("Recovery Kit confirmed; the kit file on this Mac is deleted. The vault can store secrets now.");
-    print_backup(&status);
+    let reply = client::confirm_kit(paths, &typed)?;
+    drop(typed);
+    println!("Recovery Kit confirmed. The vault can store secrets now.");
+    delete_kit(reply.kit_path.as_deref());
+    print_backup(&reply.backup);
     Ok(())
 }
 
@@ -309,8 +246,9 @@ fn add(
     username: Option<String>,
     yes: bool,
 ) -> Result<(), VaultError> {
-    let mut vault = Vault::open(paths)?;
-    if !vault.kit_confirmed() {
+    let status = client::status(paths)?;
+    let vault = status.vault.ok_or(VaultError::NotInitialized)?;
+    if !vault.kit_confirmed {
         return Err(VaultError::KitNotConfirmed);
     }
     let kind = match kind {
@@ -318,13 +256,19 @@ fn add(
         KindArg::Login => Kind::Login,
         KindArg::TwoFactor => Kind::TwoFactor,
     };
-    let rule = match kind {
+    // The rule is checked here for the person to read, and again by the daemon, which never
+    // takes a ready-made rule (R7).
+    let rule_input = match kind {
         Kind::ApiKey => {
             let host = host.ok_or_else(|| VaultError::InvalidRule("an API key needs --host".into()))?;
             let methods = if methods.is_empty() { vec!["GET".to_string()] } else { methods };
-            Some(rules::parse_rule(&host, port, &methods, &path, &header)?)
+            Some(RuleInput { host, port, methods, path, header })
         }
         _ => None,
+    };
+    let rule = match &rule_input {
+        Some(input) => Some(vault::rules::parse_rule(&input.host, input.port, &input.methods, &input.path, &input.header)?),
+        None => None,
     };
     let site = match (&site, &rule) {
         (Some(site), _) => site.clone(),
@@ -354,109 +298,173 @@ fn add(
         Kind::TwoFactor => "2FA seed, base32 or otpauth:// link (hidden): ",
     };
     let value = read_hidden(prompt)?;
-    let (summary, status) = vault.add(NewSecret { name, kind, site, rule, username, value })?;
-    println!("Saved {} {:?} for {}.", summary.kind.label(), summary.name, summary.site);
-    print_backup(&status);
+    // R27: sent only to a daemon verified as the vault's account.
+    let reply = client::add(paths, &name, kind, &site, rule_input.as_ref(), username.as_deref(), &value)?;
+    drop(value);
+    println!("Saved {} {:?} for {}.", reply.secret.kind.label(), reply.secret.name, reply.secret.site);
+    print_backup(&reply.backup);
     Ok(())
 }
 
 fn delete(paths: &Paths, name: &str, yes: bool) -> Result<(), VaultError> {
-    let mut vault = Vault::open(paths)?;
     if !yes && !confirm(&format!("Delete {name:?}? Earlier backups keep it."))? {
         println!("Nothing deleted.");
         return Ok(());
     }
-    let status = vault.delete(name)?;
+    let reply = client::delete(paths, name)?;
     println!("Deleted {name:?}.");
-    print_backup(&status);
+    print_backup(&reply.backup);
     Ok(())
 }
 
 fn list(paths: &Paths) -> Result<(), VaultError> {
-    let vault = Vault::open(paths)?;
-    let secrets = vault.summaries();
-    vault.audit(AuditEvent::new("list", "ok"))?;
-    if secrets.is_empty() {
+    let reply = client::list(paths)?;
+    if reply.secrets.is_empty() {
         println!("No secrets yet.");
         return Ok(());
     }
     println!("{:<24} {:<8} SITE", "NAME", "KIND");
-    for secret in secrets {
+    for secret in reply.secrets {
         println!("{:<24} {:<8} {}", secret.name, secret.kind.label(), secret.site);
     }
     Ok(())
 }
 
+/// Who owns a path and its mode, for `status`.
+fn owner_and_mode(path: &std::path::Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            let owner = store::account_by_uid(meta.uid()).map_or(meta.uid().to_string(), |a| a.name);
+            format!("{owner}, mode {:o}", meta.mode() & 0o7777)
+        }
+        Err(_) => "missing".into(),
+    }
+}
 
 fn status(paths: &Paths) -> Result<(), VaultError> {
-    let report = ops::status(paths);
-    println!("Volgenic vault {}", vault::VERSION);
-    println!("  program signature: {}", report.signature);
-    println!("  vault folder:      {}", report.vault_folder.display());
-    println!("  Secure Enclave:    {}", if report.secure_enclave { "available" } else { "NOT available" });
-    println!("  key protection:    {}", report.key_protection);
-    println!("  protected key:     {}", if report.key_file { "present (key.se)" } else { "absent" });
+    println!("Volgenic vault {} (commit {})", vault::VERSION, vault::GIT_COMMIT);
+    let installed = paths.program.exists();
+    if installed {
+        let signature = platform::signature_of(&paths.program);
+        let sha = platform::sha256_of(&paths.program).unwrap_or_else(|_| "unreadable".into());
+        println!("  installed program: {} ({})", paths.program.display(), owner_and_mode(&paths.program));
+        println!("                     {}", signature.describe());
+        println!("                     SHA-256 {sha}");
+    } else {
+        println!("  installed program: none. Install with `sudo vault install-system`.");
+    }
+    match store::role_account() {
+        Some(role) => println!("  vault account:     {} (user ID {})", store::ROLE_USER, role.uid),
+        None => println!("  vault account:     missing"),
+    }
+    println!("  vault folder:      {} ({})", paths.dir.display(), owner_and_mode(&paths.dir));
+    println!("  root's folder:     {} ({})", paths.root_dir.display(), owner_and_mode(&paths.root_dir));
+    println!(
+        "  Secure Enclave:    {}",
+        if vault::keyprotect::hardware_available() { "available" } else { "NOT available" }
+    );
     println!("  Keychain:          not used (no Keychain dialogs, ever)");
-    println!("  backup folder:     read and written only by vault serve");
     println!(
         "  automatic login:   {}",
-        if report.auto_login_on { "ON: the vault refuses to run until it is turned off" } else { "off (required)" }
+        if platform::auto_login_on() { "ON: the vault refuses to run until it is turned off" } else { "off (required)" }
     );
-    println!("  FileVault:         {} (information only)", report.filevault);
-    println!("  serve:             {}", if report.serve_running { "running, socket answering" } else { "not running" });
-    if !report.vault_exists {
-        println!("\nNo vault on this Mac yet. Run `vault init`.");
+    println!("  FileVault:         {} (information only)", platform::filevault_status());
+    if !installed {
         return Ok(());
     }
-    if let Some(error) = &report.open_error {
-        println!("\nThe vault exists but can't be opened: {error}");
-        return Ok(());
-    }
-    if let Some(opened) = &report.opened {
-        println!("\nVault {}", opened.vault_id);
-        println!("  created:           {}", opened.created_at);
-        println!("  recovery key:      fingerprint {}", opened.recovery_fingerprint);
-        println!(
-            "  Recovery Kit:      {}",
-            if opened.kit_confirmed { "confirmed" } else { "NOT confirmed: run `vault confirm-kit`; no secrets until then" }
-        );
-        let kinds: Vec<String> = opened.by_kind.iter().map(|(k, n)| format!("{n} {}", k.label())).collect();
-        println!("  secrets:           {} ({})", opened.secrets, kinds.join(", "));
-        println!("  changes so far:    {}", opened.generation);
-        println!("  backup folder:     {}", opened.backup_dir);
-        match &opened.last_backup {
-            Some(backup) if backup.ok => println!(
-                "  last backup:       OK, generation {} at {}, read back and decrypted",
-                backup.generation, backup.at
-            ),
-            Some(backup) => println!("  last backup:       FAILED at {}: {} (changes refused until a backup succeeds)", backup.at, backup.detail),
-            None => println!("  last backup:       none yet"),
-        }
-        match &opened.audit_chain {
-            Ok(lines) => println!("  audit log:         {lines} lines, hash chain intact"),
-            Err(error) => println!("  audit log:         PROBLEM: {error}"),
-        }
-        if !opened.recent_changes.is_empty() {
-            println!("  recent changes:");
-            for change in &opened.recent_changes {
-                println!("    {change}");
+    let reply = match client::status(paths) {
+        Ok(reply) => reply,
+        Err(error) => {
+            println!("  daemon:            {error}");
+            if let Ok(log) = std::fs::read_to_string(&paths.daemon_log) {
+                println!("  last lines of {}:", paths.daemon_log.display());
+                let lines: Vec<&str> = log.lines().collect();
+                for line in &lines[lines.len().saturating_sub(5)..] {
+                    println!("    {line}");
+                }
             }
+            return Ok(());
+        }
+    };
+    println!(
+        "  daemon:            answering as {} (user ID {}), pid {}, version {}",
+        store::ROLE_USER,
+        reply.uid,
+        reply.pid,
+        reply.version
+    );
+    println!("  Secure Enclave key: {}", reply.key_protection);
+    println!("  local backups:     {}", reply.local_backups);
+    let Some(opened) = &reply.vault else {
+        println!("\nNo vault on this Mac yet.");
+        if reply.restore_point {
+            println!("`vault reset` kept a restore point: restore it with `vault restore`.");
+        } else {
+            println!("Restore one with `vault restore FILE`.");
+        }
+        return Ok(());
+    };
+    println!("\nVault {}", opened.vault_id);
+    println!("  created:           {}", opened.created_at);
+    println!("  recovery key:      fingerprint {}", opened.recovery_fingerprint);
+    println!(
+        "  Recovery Kit:      {}",
+        if opened.kit_confirmed { "confirmed" } else { "NOT confirmed: run `vault confirm-kit`; no secrets until then" }
+    );
+    if let (false, Some(kit)) = (opened.kit_confirmed, &opened.kit_path) {
+        println!("                     the kit file: {kit}");
+    }
+    let kinds: Vec<String> = opened.by_kind.iter().map(|(k, n)| format!("{n} {}", k.label())).collect();
+    println!("  secrets:           {} ({})", opened.secrets, kinds.join(", "));
+    println!("  changes so far:    {}", opened.generation);
+    match &opened.last_backup {
+        Some(backup) if backup.ok => println!(
+            "  last backup:       OK, generation {} at {}, read back and decrypted",
+            backup.generation, backup.at
+        ),
+        Some(backup) => println!(
+            "  last backup:       FAILED at {}: {} (changes refused until a backup succeeds)",
+            backup.at, backup.detail
+        ),
+        None => println!("  last backup:       none yet"),
+    }
+    println!("  mirror folder:     {}", opened.mirror_dir);
+    match &reply.mirror {
+        None => println!("  last mirror:       none yet. Run `vault install-mirror`."),
+        Some(mirror) if mirror.ok => {
+            let behind = mirror.newest_generation.map_or(opened.generation, |g| opened.generation.saturating_sub(g));
+            println!(
+                "  last mirror:       OK at {}, newest generation {} ({}), checked by SHA-256",
+                mirror.at,
+                mirror.newest_generation.map_or("none".into(), |g| g.to_string()),
+                if behind == 0 { "up to date".to_string() } else { format!("{behind} behind") }
+            );
+        }
+        Some(mirror) => println!("  last mirror:       FAILED at {}: {}", mirror.at, mirror.detail),
+    }
+    println!("                     (reported by the mirror agent; any program running as you could send one)");
+    match (&opened.audit_lines, &opened.audit_problem) {
+        (Some(lines), _) => println!("  audit log:         {lines} lines, hash chain intact"),
+        (None, Some(problem)) => println!("  audit log:         PROBLEM: {problem}"),
+        _ => {}
+    }
+    if !opened.recent_changes.is_empty() {
+        println!("  recent changes:");
+        for change in &opened.recent_changes {
+            println!("    {change}");
         }
     }
     Ok(())
 }
 
 fn show_audit(paths: &Paths, all: bool) -> Result<(), VaultError> {
-    let (lines, chain) = match audit::read_and_verify(&paths.audit_log) {
-        Ok((lines, _)) => (lines, Ok(())),
-        Err(error) => (Vec::new(), Err(error)),
-    };
-    if let Err(error) = &chain {
-        println!("PROBLEM: {error}");
+    let reply = client::audit(paths, all)?;
+    if let Some(problem) = &reply.problem {
+        println!("PROBLEM: {problem}");
         return Ok(());
     }
-    let skip = if all { 0 } else { lines.len().saturating_sub(25) };
-    for line in &lines[skip..] {
+    for line in &reply.lines {
         let e = &line.event;
         let mut text = format!("{}  {:<14} {:<22}", line.t, e.event, e.name.clone().unwrap_or_default());
         if let (Some(method), Some(host)) = (&e.method, &e.host) {
@@ -476,172 +484,120 @@ fn show_audit(paths: &Paths, all: bool) -> Result<(), VaultError> {
         }
         println!("{text}");
     }
-    println!("-- {} lines, hash chain intact{}", lines.len(), if skip > 0 { format!("; showing the last {}", lines.len() - skip) } else { String::new() });
-    if store::vault_exists(paths) {
-        if let Ok(vault) = Vault::open(paths) {
-            let _ = vault.audit(AuditEvent::new("audit", "ok"));
-        }
-    }
+    let shown = reply.lines.len();
+    println!(
+        "-- {} lines, hash chain intact{}",
+        reply.total,
+        if shown < reply.total { format!("; showing the last {shown}") } else { String::new() }
+    );
     Ok(())
 }
 
-fn verify_backup(paths: &Paths, file: Option<PathBuf>, with_recovery_key: bool) -> Result<(), VaultError> {
-    if file.is_none() && !with_recovery_key {
-        // The usual check goes through `serve`, the only program that touches the backup
-        // folder (R32), so it never needs a file-access permission for Terminal or an agent.
-        let check = vault::client::request_verify(paths)?;
-        println!("Backup {} (checked by vault serve)", check.file);
-        println!("  generation {}, written {} (newest)", check.generation, check.written_at);
-        println!("  decrypted with the vault's check key: OK, {} secrets", check.secrets);
-        println!(
-            "  matches the vault: {}",
-            if check.matches_vault { "yes, every name, rule and value" } else { "NO (the vault changed since)" }
-        );
+fn verify_backup(paths: &Paths, with_recovery_key: bool) -> Result<(), VaultError> {
+    let check = client::verify(paths)?;
+    println!("Backup {} (checked by the daemon)", check.file);
+    println!("  generation {}, written {} (newest)", check.generation, check.written_at);
+    println!("  decrypted with the vault's check key: OK, {} secrets", check.secrets);
+    println!(
+        "  matches the vault: {}",
+        if check.matches_vault { "yes, every name, rule and value" } else { "NO (the vault changed since)" }
+    );
+    if !with_recovery_key {
         println!("  recovery key: not checked (add --with-recovery-key)");
         return if check.matches_vault { Ok(()) } else { Err(VaultError::BackupMismatch) };
     }
-    if file.is_some() {
-        println!("This reads the file you named from this terminal. In iCloud Drive, Desktop, Documents");
-        println!("or Downloads, macOS may first ask whether this terminal app may access it.");
-    }
-    let vault = Vault::open(paths)?;
-    let recovery = if with_recovery_key {
-        Some(read_hidden("Recovery key (AGE-SECRET-KEY-1...), hidden: ")?)
-    } else {
-        None
-    };
-    let report = vault.verify_backup(file, recovery)?;
-    println!("Backup {}", report.file.display());
-    println!("  generation {}, written {}{}", report.generation, report.written_at, if report.newest { " (newest)" } else { "" });
-    println!("  decrypted with the vault's check key: OK, {} secrets", report.secrets);
-    println!(
-        "  matches the vault: {}",
-        if report.matches_vault { "yes, every name, rule and value" } else { "NO (an older generation, or the vault changed since)" }
-    );
-    match report.recovery_key_opens {
-        Some(true) => println!("  recovery key opens it: yes"),
-        Some(false) => println!("  recovery key opens it: NO"),
-        None => println!("  recovery key: not checked (add --with-recovery-key)"),
-    }
-    if !report.matches_vault && report.newest {
+    let fingerprint = client::status(paths)?.vault.map(|v| v.recovery_fingerprint).ok_or(VaultError::NotInitialized)?;
+    let (file, data) = client::read_newest(paths)?;
+    let typed = read_hidden("Recovery key (AGE-SECRET-KEY-1...), hidden: ")?;
+    // R27: this check changes nothing, so it runs here and the key never crosses the socket.
+    let opens = client::recovery_key_opens(&data, typed, &fingerprint);
+    println!("  recovery key opens {file}: {}", if opens { "yes" } else { "NO" });
+    if !check.matches_vault {
         return Err(VaultError::BackupMismatch);
     }
-    if report.recovery_key_opens == Some(false) {
+    if !opens {
         return Err(VaultError::WrongRecoveryKey);
     }
     Ok(())
 }
 
 fn backup_now(paths: &Paths) -> Result<(), VaultError> {
-    let status = Vault::open(paths)?.backup()?;
-    print_backup(&status);
-    if status.ok { Ok(()) } else { Err(VaultError::BackupFailed(status.detail)) }
+    let reply = client::backup(paths)?;
+    print_backup(&reply.backup);
+    if reply.backup.ok { Ok(()) } else { Err(VaultError::BackupFailed(reply.backup.detail)) }
 }
 
-fn restore(paths: &Paths, file: Option<&Path>) -> Result<(), VaultError> {
-    match file {
-        Some(_) => {
+fn restore(paths: &Paths, file: Option<PathBuf>) -> Result<(), VaultError> {
+    let status = client::status(paths)?;
+    if status.vault.is_some() {
+        return Err(VaultError::AlreadyInitialized);
+    }
+    let file = match file {
+        Some(path) => {
             println!("This reads the file you named from this terminal. In iCloud Drive, Desktop, Documents");
             println!("or Downloads, macOS may first ask whether this terminal app may access it.");
+            let data = std::fs::read(&path)
+                .map_err(|e| VaultError::BackupFailed(format!("can't read {}: {e}", path.display())))?;
+            Some((path.display().to_string(), data))
         }
-        None if !ops::has_restore_point(paths) => {
+        None if !status.restore_point => {
             return Err(VaultError::InvalidSecret(
                 "no restore point on this Mac; name a backup file: vault restore FILE".into(),
             ));
         }
-        None => println!("Restoring the backup `vault reset` kept in the vault folder."),
-    }
+        None => {
+            println!("Restoring the backup `vault reset` kept in the vault folder.");
+            None
+        }
+    };
     let typed = read_hidden("Recovery key (AGE-SECRET-KEY-1...), hidden: ")?;
-    let report = ops::restore(paths, file, typed)?;
+    // R27: sent only to a daemon verified as the vault's account.
+    let reply = client::restore(paths, &typed, file)?;
+    drop(typed);
     println!(
         "Restored as vault {} from vault {} generation {}.",
-        report.vault_id, report.from_vault_id, report.from_generation
+        reply.vault_id, reply.from_vault_id, reply.from_generation
     );
-    println!("  new Secure Enclave key, vault key and vault id made on this Mac; older backups stay as they are");
-    for secret in &report.secrets {
+    println!("  new vault key and vault id, wrapped by this Mac's Secure Enclave key; older backups stay as they are");
+    for secret in &reply.secrets {
         println!("  {:<24} {:<8} {}", secret.name, secret.kind.label(), secret.site);
     }
-    restart_serve(paths)?;
-    let backup = first_backup(paths)?;
-    print_backup(&backup);
-    if backup.ok { Ok(()) } else { Err(VaultError::BackupFailed(backup.detail)) }
+    print_backup(&reply.backup);
+    if reply.backup.ok { Ok(()) } else { Err(VaultError::BackupFailed(reply.backup.detail)) }
 }
 
 fn reset(paths: &Paths) -> Result<(), VaultError> {
-    if Vault::open(paths)?.is_unused() {
+    let status = client::status(paths)?;
+    let vault = status.vault.ok_or(VaultError::NotInitialized)?;
+    if !vault.kit_confirmed && vault.secrets == 0 {
         println!("This vault never held a secret (its Recovery Kit isn't confirmed), so it can be");
         println!("removed without the recovery key. The kit file, if still there, is deleted too.");
         if !confirm("Remove it?")? {
             println!("Nothing changed.");
             return Ok(());
         }
-        ops::reset_unused(paths)?;
-        println!("Unused vault removed. Run `vault init` to start again.");
+        let reply = client::reset(paths, None)?;
+        delete_kit(reply.kit_path.as_deref());
+        println!("Unused vault removed. Restore one with `vault restore FILE`, or make a new one with");
+        println!("`sudo vault install-system`.");
         return Ok(());
     }
-    println!("This removes the vault from this Mac (its vault file and key.se) so a backup");
-    println!("can be restored. Backups and the audit log stay. It needs the recovery key, and it");
-    println!("only goes ahead if the newest backup opens with that key and matches the vault.");
+    println!("This removes the vault from this Mac (its vault file and wrapped key) so a backup can");
+    println!("be restored. The Secure Enclave key, the backups and the audit log stay. It needs the");
+    println!("recovery key, and it only goes ahead if the newest backup opens with that key and");
+    println!("matches the vault.");
     if !confirm("Go ahead?")? {
         println!("Nothing changed.");
         return Ok(());
     }
     let typed = read_hidden("Recovery key (AGE-SECRET-KEY-1...), hidden: ")?;
-    let newest = ops::reset(paths, typed)?;
-    println!("Vault removed from this Mac. Its newest backup ({}) is kept in", newest.display());
-    println!("the vault folder as a restore point. Restore it with:");
+    let reply = client::reset(paths, Some(&typed))?;
+    drop(typed);
+    println!(
+        "Vault removed from this Mac. Its newest backup ({}) is kept in the vault folder as a",
+        reply.newest_file.unwrap_or_default()
+    );
+    println!("restore point. Restore it with:");
     println!("  vault restore");
     Ok(())
-}
-
-fn install_agent(paths: &Paths) -> Result<(), VaultError> {
-    let exe = std::env::current_exe()?.canonicalize()?;
-    let log_dir = paths.log_file.parent().map(Path::to_path_buf).unwrap_or_default();
-    std::fs::create_dir_all(&log_dir)?;
-    if let Some(dir) = paths.launch_agent.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.volgenic.vault</string>
-  <key>ProgramArguments</key>
-  <array><string>{exe}</string><string>serve</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>LimitLoadToSessionType</key><string>Aqua</string>
-  <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>{log}</string>
-  <key>StandardErrorPath</key><string>{log}</string>
-</dict>
-</plist>
-"#,
-        exe = xml_escape(&exe.display().to_string()),
-        log = xml_escape(&paths.log_file.display().to_string()),
-    );
-    store::write_atomic(&paths.launch_agent, plist.as_bytes())?;
-    let domain = format!("gui/{}", unsafe { libc::getuid() });
-    let _ = std::process::Command::new("/bin/launchctl")
-        .args(["bootout", &format!("{domain}/com.volgenic.vault")])
-        .output();
-    let out = std::process::Command::new("/bin/launchctl")
-        .args(["bootstrap", &domain])
-        .arg(&paths.launch_agent)
-        .output()?;
-    if !out.status.success() {
-        return Err(VaultError::Io(format!(
-            "launchctl bootstrap failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    println!("LaunchAgent com.volgenic.vault installed and started:");
-    println!("  {}", paths.launch_agent.display());
-    println!("  runs {} serve at login; log: {}", exe.display(), paths.log_file.display());
-    Ok(())
-}
-
-fn xml_escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }

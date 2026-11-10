@@ -68,6 +68,53 @@ impl SecretValue {
     }
 }
 
+/// A byte buffer that never leaves an unwiped copy of its contents behind (R1). When it must
+/// grow it copies into a new allocation and wipes the old one, instead of letting `Vec`
+/// reallocate; it wipes itself when dropped. Used for request lines and secret values read off
+/// the socket.
+pub(crate) struct WipingBuf {
+    bytes: Vec<u8>,
+}
+
+impl WipingBuf {
+    pub fn with_capacity(capacity: usize) -> Self {
+        WipingBuf { bytes: Vec::with_capacity(capacity.max(16)) }
+    }
+
+    pub fn extend_from_slice(&mut self, data: &[u8]) {
+        let needed = self.bytes.len() + data.len();
+        if needed > self.bytes.capacity() {
+            let mut grown = Vec::with_capacity(needed.max(self.bytes.capacity() * 2));
+            grown.extend_from_slice(&self.bytes);
+            self.bytes.zeroize(); // wipes the whole old allocation, spare capacity included
+            self.bytes = grown;
+        }
+        self.bytes.extend_from_slice(data);
+    }
+
+    pub fn push(&mut self, byte: u8) {
+        self.extend_from_slice(&[byte]);
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn into_secret(mut self) -> SecretValue {
+        SecretValue::from_vec(std::mem::take(&mut self.bytes))
+    }
+}
+
+impl Drop for WipingBuf {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
 impl Drop for SecretValue {
     fn drop(&mut self) {
         self.bytes.zeroize();
