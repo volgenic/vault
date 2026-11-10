@@ -64,7 +64,7 @@ pub fn hash_line(line: &str) -> String {
 }
 
 /// Appends an event and returns the new head of the chain. The daemon's threads (and
-/// `install-system`, before the daemon starts) append,
+/// `vault install`, before the daemon starts) append,
 /// so the file is locked while the last line is read and the new one written.
 pub fn append(log: &Path, event: AuditEvent) -> Result<String, VaultError> {
     let mut file = OpenOptions::new().read(true).append(true).create(true).mode(0o600).open(log)?;

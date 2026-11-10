@@ -62,7 +62,7 @@ pub fn run() -> Result<(), VaultError> {
     if unsafe { libc::geteuid() } == 0 {
         return Err(VaultError::Io("the mirror runs as the vault's owner, never as root".into()));
     }
-    let paths = Paths::system();
+    let paths = Paths::current();
     let plan = client::mirror_plan(&paths)?;
     let started = crate::now_rfc3339();
     let result = mirror_once(Path::new(&plan.local_dir), Path::new(&plan.mirror_dir), &plan.vault_id);

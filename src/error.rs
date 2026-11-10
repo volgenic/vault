@@ -107,7 +107,7 @@ impl fmt::Display for VaultError {
             AlreadyInitialized => write!(f, "a vault already exists on this Mac"),
             NotInitialized => write!(
                 f,
-                "no vault on this Mac: install one with `sudo vault install-system`, or restore one with `vault restore`"
+                "no vault on this Mac: install one with `vault install`, or restore one with `vault restore`"
             ),
             AutoLoginOn => write!(
                 f,

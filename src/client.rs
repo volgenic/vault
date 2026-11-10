@@ -1,12 +1,8 @@
 //! The command-line tool's side of the socket. Every command is a request to the daemon, the
-//! only process that can read or change the vault (R13, R26).
+//! only process that reads or changes the vault (R13, R26).
 //!
-//! Before sending anything, the client checks it is talking to the vault (R22, R27):
-//! - the socket's folder and the socket itself belong to the vault's account and aren't
-//!   symbolic links (only root and that account can put a socket there);
-//! - `getpeereid` on the connection reports the vault's account.
-//!
-//! Only then may a request carry a typed value or the recovery key.
+//! Before sending anything, the client checks the socket's folder and the socket are its own
+//! user's and not symbolic links, and that `getpeereid` reports its own user ID (R22, R27).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
@@ -35,26 +31,18 @@ const SHORT_WAIT: Duration = Duration::from_secs(30);
 /// Changes and backups: a change writes the vault file and a backup, then reads it back.
 const CHANGE_WAIT: Duration = Duration::from_secs(120);
 
-/// Connects to the daemon and checks it is the vault's (R22).
+/// Connects to the daemon and checks it runs as this user (R22).
 fn connect_verified(paths: &Paths) -> Result<UnixStream, VaultError> {
-    let role = store::role_account().ok_or(VaultError::NotInstalled)?;
-    store::check_dir(&paths.socket_dir, role.uid, 0o022)
-        .map_err(|e| VaultError::DaemonNotVerified(e.to_string()))?;
+    let me = unsafe { libc::getuid() };
+    store::check_dir(&paths.socket_dir, me, 0o077).map_err(|e| VaultError::DaemonNotVerified(e.to_string()))?;
     let meta = std::fs::symlink_metadata(&paths.socket).map_err(|_| VaultError::DaemonNotRunning)?;
-    if !meta.file_type().is_socket() || meta.uid() != role.uid {
-        return Err(VaultError::DaemonNotVerified(format!(
-            "{} isn't a socket owned by {}",
-            paths.socket.display(),
-            store::ROLE_USER
-        )));
+    if !meta.file_type().is_socket() || meta.uid() != me {
+        return Err(VaultError::DaemonNotVerified(format!("{} isn't a socket of yours", paths.socket.display())));
     }
     let stream = UnixStream::connect(&paths.socket).map_err(|_| VaultError::DaemonNotRunning)?;
     let (mut uid, mut gid): (libc::uid_t, libc::gid_t) = (0, 0);
-    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 || uid != role.uid {
-        return Err(VaultError::DaemonNotVerified(format!(
-            "the process behind the socket isn't {} (user ID {uid})",
-            store::ROLE_USER
-        )));
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 || uid != me {
+        return Err(VaultError::DaemonNotVerified(format!("the process behind the socket is user ID {uid}, not you")));
     }
     Ok(stream)
 }

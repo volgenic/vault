@@ -1,14 +1,7 @@
-//! `vault daemon`: the vault's background part, run by the LaunchDaemon `com.volgenic.vault`.
-//!
-//! It starts as root, and while still root (R14):
-//! 1. reads `system.json` (the owner's user ID) from root's folder;
-//! 2. reads the Secure Enclave key's public half;
-//! 3. unwraps the vault key with the Secure Enclave. After a restart this fails until someone
-//!    logs in (CryptoKit's default protection), so it waits and retries.
-//!
-//! Then it drops to the vault's own account for good, opens the socket and serves. It is the
-//! only process that reads or changes the vault (R13), and the only one that writes the local
-//! backups (R32). Callers must be the owner's user ID or root (R22).
+//! `vault daemon`: the vault's background part, run by the LaunchAgent `com.volgenic.vault` in
+//! the owner's login, as the owner. It reads the vault key file, opens the socket and serves. It
+//! is the only process that reads or changes the vault (R13), and the only one that writes the
+//! local backups (R32). Callers must be the owner's own user ID (R22).
 
 use std::fs;
 use std::io::{Read, Write};
@@ -18,7 +11,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -28,7 +21,7 @@ use crate::audit::{self, AuditEvent};
 use crate::backup;
 use crate::secret::WipingBuf;
 use crate::error::VaultError;
-use crate::keyprotect::{self, SePublic};
+use crate::keyprotect;
 use crate::model::{Kind, MirrorState, VaultDoc};
 use crate::platform::{self, Peer};
 use crate::protocol::{
@@ -37,17 +30,14 @@ use crate::protocol::{
 };
 use crate::proxy::{self, ProxyRequest};
 use crate::rules;
-use crate::store::{self, OwnerPaths, Paths, SystemConfig};
+use crate::store::{self, OwnerPaths, Paths};
 use crate::vault::{self, NewSecret, Vault};
 
 const MAX_CONNECTIONS: usize = 16;
-/// How often to retry the Secure Enclave before the first login after a restart.
-const UNWRAP_RETRY: Duration = Duration::from_secs(15);
 
 struct Server {
     paths: Paths,
-    config: SystemConfig,
-    se_public: SePublic,
+    owner_uid: u32,
     /// The mirror folder a restored-from-file vault gets: the owner's iCloud Drive.
     default_mirror_dir: PathBuf,
     /// The open vault, or none (before a restore). Every change and backup holds this lock, so
@@ -64,39 +54,19 @@ fn log(message: &str) {
 }
 
 pub fn run() -> Result<(), VaultError> {
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(VaultError::NotRoot);
+    let owner_uid = unsafe { libc::getuid() };
+    if owner_uid == 0 {
+        return Err(VaultError::Io("the vault runs as its owner, never as root".into()));
     }
-    let paths = Paths::system();
-    let config = store::read_system_config(&paths)?;
-    let role = store::role_account().ok_or(VaultError::NotInstalled)?;
-    if role.uid != config.role_uid || role.gid != config.role_gid {
-        return Err(VaultError::UnsafeVaultFolder(format!(
-            "{} is user {} group {}, but install-system recorded {} and {}",
-            store::ROLE_USER,
-            role.uid,
-            role.gid,
-            config.role_uid,
-            config.role_gid
-        )));
+    let paths = Paths::current();
+    for dir in [&paths.dir, &paths.local_backups, &paths.socket_dir] {
+        store::check_dir(dir, owner_uid, 0o077)?;
     }
-    if platform::auto_login_on() {
-        return Err(VaultError::AutoLoginOn); // R31
-    }
-    store::check_dir(&paths.dir, role.uid, 0o077)?;
-    store::check_dir(&paths.local_backups, role.uid, 0o022)?;
-    store::check_dir(&paths.socket_dir, role.uid, 0o022)?;
-
-    // Root's part (R14): the Secure Enclave key's public half, and the vault key.
-    let se_public = keyprotect::load_public(&paths.root_dir)?;
-    let opened = if store::vault_exists(&paths) { Some(open_waiting_for_login(&paths)?) } else { None };
-    let default_mirror_dir = OwnerPaths::for_uid(config.owner_uid)?.icloud_backups();
-
-    platform::drop_privileges(role.uid, role.gid)?;
     unsafe {
         libc::umask(0o077);
     }
-    log(&format!("dropped root; running as {} (user ID {})", store::ROLE_USER, role.uid));
+    let opened = if store::vault_exists(&paths) { Some(Vault::open(&paths)?) } else { None };
+    let default_mirror_dir = OwnerPaths::for_uid(owner_uid)?.icloud_backups();
 
     let client = proxy::client()?;
     match fs::symlink_metadata(&paths.socket) {
@@ -110,8 +80,8 @@ pub fn run() -> Result<(), VaultError> {
         Err(_) => {}
     }
     let listener = UnixListener::bind(&paths.socket)?;
-    // 0666: any local user may connect; the daemon then accepts only the owner and root (R22).
-    fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o666))?;
+    // Only the owner can reach it: the folder is 0700, and every caller is checked (R22).
+    fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
 
     let snapshot = match &opened {
         Some(vault) => Some(Arc::new(vault.read_copy()?)),
@@ -119,8 +89,7 @@ pub fn run() -> Result<(), VaultError> {
     };
     let server = Arc::new(Server {
         paths: paths.clone(),
-        config,
-        se_public,
+        owner_uid,
         default_mirror_dir,
         vault: Mutex::new(opened),
         snapshot: RwLock::new(snapshot),
@@ -129,16 +98,16 @@ pub fn run() -> Result<(), VaultError> {
     });
     let mut event = AuditEvent::new("daemon", "started");
     event.detail = Some(format!(
-        "pid {}, as {}, vault {}, socket {}",
+        "pid {}, as user ID {}, vault {}, socket {}",
         std::process::id(),
-        store::ROLE_USER,
+        owner_uid,
         if server.snapshot.read().map(|s| s.is_some()).unwrap_or(false) { "open" } else { "absent" },
         paths.socket.display()
     ));
     audit::append(&paths.audit_log, event)?;
     log(&format!("serving on {}", paths.socket.display()));
 
-    // A vault just made by install-system, or one whose last backup failed: back it up now.
+    // A vault just made by `vault install`, or one whose last backup failed: back it up now.
     let _ = server.with_vault(|vault| {
         if let Some(status) = vault.backup_if_needed() {
             log(&format!("backup of generation {}: {}", status.generation, if status.ok { "ok" } else { "FAILED" }));
@@ -163,30 +132,6 @@ pub fn run() -> Result<(), VaultError> {
     Ok(())
 }
 
-/// Opens the vault as root. Before the first login since a restart the Secure Enclave key can't
-/// be used, so this waits and retries rather than exiting (launchd would only restart it).
-fn open_waiting_for_login(paths: &Paths) -> Result<Vault, VaultError> {
-    let started = Instant::now();
-    let mut last_log: Option<Instant> = None;
-    loop {
-        match Vault::open(paths) {
-            Ok(vault) => {
-                if last_log.is_some() {
-                    log(&format!("the Secure Enclave answered after {}s", started.elapsed().as_secs()));
-                }
-                return Ok(vault);
-            }
-            Err(VaultError::SecureEnclave) => {
-                if last_log.is_none_or(|at| at.elapsed() >= Duration::from_secs(600)) {
-                    log("the Secure Enclave refused to unwrap the vault key; waiting for the first login since the restart, retrying every 15s");
-                    last_log = Some(Instant::now());
-                }
-                std::thread::sleep(UNWRAP_RETRY);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
 
 /// Reads one request line straight into a buffer that is wiped when dropped, through a chunk
 /// that is wiped too: no ordinary buffer ever holds a request, which may carry a typed value or
@@ -322,9 +267,9 @@ impl Server {
     }
 
     fn handle(&self, mut stream: UnixStream) {
-        // R22: only the owner's user ID, or root. R23: the caller's pid and program are a hint.
+        // R22: only the owner's user ID. R23: the caller's pid and program are a hint.
         let Some(peer) = platform::peer_of(stream.as_raw_fd()) else { return };
-        if peer.uid != self.config.owner_uid && peer.uid != 0 {
+        if peer.uid != self.owner_uid {
             let mut event = AuditEvent::new("connect", "denied: not the owner's user ID");
             event.detail = Some(format!("uid {}", peer.uid));
             self.audit(with_peer(event, &peer));
@@ -482,7 +427,7 @@ impl Server {
                         return Err(VaultError::AlreadyInitialized);
                     }
                     let (mut restored, report) =
-                        vault::restore(&self.paths, &self.se_public, file, &self.default_mirror_dir, recovery_key)?;
+                        vault::restore(&self.paths, file, &self.default_mirror_dir, recovery_key)?;
                     // The vault is on disk now: hold it even if its first backup fails, so the
                     // daemon and the disk agree (the failure is the alarm of R19).
                     let backup = restored.backup();

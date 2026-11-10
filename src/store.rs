@@ -1,15 +1,16 @@
-//! Where the vault keeps its files, and the encrypted vault file itself (R3, R13 to R15, R22).
+//! Where the vault keeps its files, and the encrypted vault file itself (R13).
 //!
-//! Every path is fixed, under `/Library/Application Support/Volgenic/`, which only root can
-//! change. No flag or environment variable moves anything (R15).
+//! Everything is the owner's own, under `~/Library/Application Support/Volgenic/` (home from the
+//! user database, never `$HOME`):
 //!
-//! | Folder         | Owner            | Mode | Holds                                              |
-//! |----------------|------------------|------|----------------------------------------------------|
-//! | `bin/`         | root             | 0755 | the program                                        |
-//! | `vault-root/`  | root             | 0700 | the Secure Enclave handle, `system.json`           |
-//! | `vault/`       | `_volgenicvault` | 0700 | vault file, wrapped key, audit log, restore point  |
-//! | `vault-backups/` | `_volgenicvault` | 0755 | backups (ciphertext, 0644, read by the mirror)   |
-//! | `socket/`      | `_volgenicvault` | 0755 | the socket, 0666                                   |
+//! | Folder           | Mode | Holds                                                    |
+//! |------------------|------|----------------------------------------------------------|
+//! | `bin/`           | 0700 | the installed program                                    |
+//! | `vault/`         | 0700 | vault file, vault key (0600), audit log, restore point   |
+//! | `vault-backups/` | 0700 | backups (ciphertext)                                     |
+//! | `socket/`        | 0700 | the socket                                               |
+//!
+//! The daemon is a LaunchAgent in the owner's login (`~/Library/LaunchAgents/`).
 
 use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions};
@@ -19,7 +20,6 @@ use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::error::VaultError;
@@ -30,23 +30,15 @@ const MAGIC: &[u8; 8] = b"VGVAULT\x01";
 const ID_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 
-/// The vault's own macOS account: a role account (name starts with `_`, ID in 450-499).
-pub const ROLE_USER: &str = "_volgenicvault";
-/// Role accounts take user and group IDs in this range (`sysadminctl -h`: "Role accounts
-/// require name starting with _ and UID in 450-499 range").
-pub const ROLE_ID_RANGE: std::ops::RangeInclusive<u32> = 450..=499;
-
 pub const DAEMON_LABEL: &str = "com.volgenic.vault";
 pub const MIRROR_LABEL: &str = "com.volgenic.vault.mirror";
 
-/// Every system path the vault uses.
+/// Every path the vault uses.
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub base: PathBuf,
     pub bin_dir: PathBuf,
     pub program: PathBuf,
-    pub root_dir: PathBuf,
-    pub system_file: PathBuf,
     pub dir: PathBuf,
     pub vault_file: PathBuf,
     pub audit_log: PathBuf,
@@ -62,16 +54,22 @@ pub struct Paths {
 }
 
 impl Paths {
-    pub fn system() -> Paths {
-        let base = PathBuf::from("/Library/Application Support/Volgenic");
+    /// The running user's vault.
+    pub fn current() -> Paths {
+        let home = account_by_uid(unsafe { libc::getuid() })
+            .map(|a| a.home)
+            .unwrap_or_else(|| PathBuf::from("/var/empty"));
+        Paths::for_home(&home)
+    }
+
+    pub fn for_home(home: &Path) -> Paths {
+        let base = home.join("Library/Application Support/Volgenic");
         let bin_dir = base.join("bin");
-        let root_dir = base.join("vault-root");
         let dir = base.join("vault");
         let socket_dir = base.join("socket");
-        let log_dir = PathBuf::from("/Library/Logs/Volgenic");
+        let log_dir = home.join("Library/Logs/Volgenic");
         Paths {
             program: bin_dir.join("vault"),
-            system_file: root_dir.join("system.json"),
             vault_file: dir.join("vault.bin"),
             audit_log: dir.join("audit.log"),
             restore_point: dir.join("restore-point.age"),
@@ -79,11 +77,10 @@ impl Paths {
             mirror_state: dir.join("mirror.json"),
             local_backups: base.join("vault-backups"),
             socket: socket_dir.join("vault.sock"),
-            daemon_plist: PathBuf::from(format!("/Library/LaunchDaemons/{DAEMON_LABEL}.plist")),
+            daemon_plist: home.join(format!("Library/LaunchAgents/{DAEMON_LABEL}.plist")),
             daemon_log: log_dir.join("vault.log"),
             log_dir,
             bin_dir,
-            root_dir,
             dir,
             socket_dir,
             base,
@@ -167,37 +164,6 @@ pub fn account_by_uid(uid: u32) -> Option<Account> {
 pub fn account_by_name(name: &str) -> Option<Account> {
     let name = CString::new(name).ok()?;
     unsafe { account_from(libc::getpwnam(name.as_ptr())) }
-}
-
-/// The vault's role account, if it exists.
-pub fn role_account() -> Option<Account> {
-    account_by_name(ROLE_USER)
-}
-
-/// What `install-system` records in root's folder: who owns the vault, and its account.
-/// Only root can write it (R15).
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SystemConfig {
-    pub owner_uid: u32,
-    pub role_uid: u32,
-    pub role_gid: u32,
-    pub installed_at: String,
-    pub installed_version: String,
-}
-
-pub fn read_system_config(paths: &Paths) -> Result<SystemConfig, VaultError> {
-    check_dir(&paths.root_dir, 0, 0o077)?;
-    let meta = fs::symlink_metadata(&paths.system_file).map_err(|_| VaultError::NotInstalled)?;
-    if !meta.is_file() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
-        return Err(VaultError::UnsafeVaultFolder(format!("{} isn't root's", paths.system_file.display())));
-    }
-    let bytes = fs::read(&paths.system_file)?;
-    serde_json::from_slice(&bytes).map_err(|_| VaultError::Io(format!("{} is damaged", paths.system_file.display())))
-}
-
-pub fn write_system_config(paths: &Paths, config: &SystemConfig) -> Result<(), VaultError> {
-    let bytes = serde_json::to_vec_pretty(config).map_err(|_| VaultError::Io("system.json encoding".into()))?;
-    write_atomic(&paths.system_file, &bytes)
 }
 
 /// Checks a folder: a real folder (not a symbolic link), owned by `uid`, with none of the

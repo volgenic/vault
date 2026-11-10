@@ -358,7 +358,7 @@ pub struct BackupReply {
 #[derive(Serialize, Deserialize)]
 pub struct ConfirmKitReply {
     pub ok: bool,
-    /// The kit file `install-system` wrote, for the command-line tool to delete: it is the
+    /// The kit file `vault install` wrote, for the command-line tool to delete: it is the
     /// owner's file, which the daemon's account can't touch.
     pub kit_path: Option<String>,
     pub backup: BackupStatus,

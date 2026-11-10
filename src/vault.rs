@@ -1,5 +1,5 @@
-//! The vault's operations. They run only in the daemon, after it has dropped to the vault's own
-//! account, and in `install-system`, as root, for the first vault (R13). The command-line tool
+//! The vault's operations. They run only in the daemon, a LaunchAgent in the owner's login, and
+//! in `vault install` for the first vault (R13). The command-line tool
 //! never opens the vault; it asks the daemon. Nothing here returns a secret value: results are
 //! summaries, codes, statuses and reports (R4).
 
@@ -11,9 +11,8 @@ use std::path::{Path, PathBuf};
 use crate::audit::{self, AuditEvent};
 use crate::backup;
 use crate::error::VaultError;
-use crate::keyprotect::{self, SePublic};
+use crate::keyprotect;
 use crate::model::{self, BackupStatus, Kind, Record, SecretSummary, VAULT_FORMAT, VaultDoc};
-use crate::platform;
 use crate::protocol::{AuditReply, BackupCheck, OpenedStatus};
 use crate::rules::ProxyRule;
 use crate::secret::SecretValue;
@@ -60,26 +59,15 @@ pub struct ResetOutcome {
     pub kit_path: Option<String>,
 }
 
-fn check_auto_login() -> Result<(), VaultError> {
-    if platform::auto_login_on() { Err(VaultError::AutoLoginOn) } else { Ok(()) }
-}
-
 fn audit_event(paths: &Paths, event: AuditEvent) -> Result<String, VaultError> {
     audit::append(&paths.audit_log, event)
 }
 
-/// Makes a new vault (R16, R17). Runs in `install-system`, as root, before the daemon starts;
-/// the caller hands the vault's files to the vault's account afterwards. The kit is written as
-/// `kit_owner`, never as root (R17). The first backup comes from the daemon when it starts.
-pub fn init(
-    paths: &Paths,
-    se_public: &SePublic,
-    kit_path: &Path,
-    kit_owner: u32,
-    mirror_dir: &Path,
-) -> Result<InitReport, VaultError> {
-    check_auto_login()?;
-    if store::vault_exists(paths) || keyprotect::wrapped_exists(&paths.dir) {
+/// Makes a new vault (R16, R17). Runs in `vault install`, before the daemon starts. The first
+/// backup comes from the daemon when it starts. No gate: secrets can be stored right away; the
+/// kit stays in the owner's home folder until he stashes it.
+pub fn init(paths: &Paths, kit_path: &Path, mirror_dir: &Path) -> Result<InitReport, VaultError> {
+    if store::vault_exists(paths) || keyprotect::key_exists(&paths.dir) {
         return Err(VaultError::AlreadyInitialized);
     }
 
@@ -89,14 +77,12 @@ pub fn init(
     let fingerprint = backup::fingerprint(&recovery_public);
     let created_at = crate::now_rfc3339();
 
-    platform::as_effective_user(kit_owner, || {
-        write_kit(kit_path, &recovery_secret, &recovery_public, &fingerprint, &created_at)
-    })?;
+    write_kit(kit_path, &recovery_secret, &recovery_public, &fingerprint, &created_at)?;
     drop(recovery_secret);
 
     let key = SecretValue::random(32)?;
-    if let Err(error) = keyprotect::wrap_and_store(se_public, &paths.dir, &key) {
-        let _ = platform::as_effective_user(kit_owner, || wipe_file(kit_path));
+    if let Err(error) = keyprotect::store_new(&paths.dir, &key) {
+        let _ = wipe_file(kit_path);
         return Err(error);
     }
 
@@ -151,11 +137,11 @@ fn write_kit(
          \n\
          What to do now:\n\
          1. Print this page, or save the key in your password manager, or both.\n\
-         2. Run `vault confirm-kit` and paste the key back when asked. The vault checks it,\n\
-            then this file is deleted. The vault stores no secret until you do.\n\
+         2. Optionally run `vault confirm-kit` and paste the key back; the vault checks it\n\
+            and deletes this file. The vault works either way.\n\
          \n\
-         If your Mac is lost or its Secure Enclave dies, this key plus a backup file brings\n\
-         the vault back on another Mac: `sudo vault install-system --for-restore`, then\n\
+         If your Mac is lost, this key plus a backup file brings the vault back on another\n\
+         Mac: `vault install --for-restore`, then\n\
          `vault restore <backup file>`. Backups are standard age files, so\n\
          `age -d -i <file holding this key> <backup>` also opens them without Volgenic.\n\
          Nobody else, Volgenic included, can open your backups. Lose this key and a dead\n\
@@ -191,13 +177,12 @@ pub fn wipe_file(path: &Path) -> Result<(), VaultError> {
 }
 
 impl Vault {
-    /// Opens the vault: unwraps the vault key with the Secure Enclave, then decrypts the vault
-    /// file. Root only: the daemon calls it before it drops root (R14).
+    /// Opens the vault: reads the vault key file, then decrypts the vault file.
     pub fn open(paths: &Paths) -> Result<Vault, VaultError> {
         if !store::vault_exists(paths) {
             return Err(VaultError::NotInitialized);
         }
-        let key = keyprotect::unwrap(&paths.root_dir, &paths.dir)?;
+        let key = keyprotect::load(&paths.dir)?;
         let doc = store::load(paths, &key)?;
         Ok(Vault { paths: paths.clone(), key, doc })
     }
@@ -278,11 +263,8 @@ impl Vault {
         status
     }
 
-    /// Before any change: the kit must be confirmed (R17) and the last backup good (R19).
+    /// Before any change: the last backup must be good (R19).
     fn ready_for_change(&mut self) -> Result<(), VaultError> {
-        if !self.doc.kit_confirmed {
-            return Err(VaultError::KitNotConfirmed);
-        }
         if !self.doc.last_backup.as_ref().is_some_and(|b| b.ok) {
             let status = self.backup_now();
             if !status.ok {
@@ -413,7 +395,7 @@ impl Vault {
 
     /// Removes this Mac's vault so a backup can be restored into a fresh one (R20). Needs the
     /// recovery key, and only goes ahead when the newest backup opens with it and matches the
-    /// vault, so nothing is lost. Keeps the backups, the audit log and the Secure Enclave key.
+    /// vault, so nothing is lost. Keeps the backups and the audit log.
     /// After this the caller drops the vault.
     pub fn reset(&mut self, typed: Option<SecretValue>) -> Result<ResetOutcome, VaultError> {
         self.reload()?;
@@ -452,11 +434,11 @@ impl Vault {
         store::write_atomic(&self.paths.restore_point_info, &info)?;
         let mut event = AuditEvent::new("reset", "ok");
         event.detail = Some(format!(
-            "vault removed (vault file and wrapped key; the Secure Enclave key stays); newest backup {} kept as the restore point",
+            "vault removed (vault file and key file); newest backup {} kept as the restore point",
             file.display()
         ));
         self.audit(event)?;
-        keyprotect::remove_wrapped(&self.paths.dir)?;
+        keyprotect::remove(&self.paths.dir)?;
         fs::remove_file(&self.paths.vault_file)?;
         Ok(ResetOutcome { unused: false, newest_file: Some(file.display().to_string()), kit_path: None })
     }
@@ -467,7 +449,7 @@ impl Vault {
         let mut event = AuditEvent::new("reset", "ok");
         event.detail = Some("unused vault removed (kit not confirmed, no secrets)".into());
         self.audit(event)?;
-        keyprotect::remove_wrapped(&self.paths.dir)?;
+        keyprotect::remove(&self.paths.dir)?;
         fs::remove_file(&self.paths.vault_file)?;
         Ok(ResetOutcome { unused: true, newest_file: None, kit_path: self.doc.kit_path.clone() })
     }
@@ -567,17 +549,14 @@ pub fn has_restore_point(paths: &Paths) -> bool {
 
 /// Restores a backup into an empty vault on this Mac, with the recovery key (R20). The backup is
 /// the file the person named, or the restore point `vault reset` kept. Makes a new vault key and
-/// a new vault id, wrapped to this Mac's existing Secure Enclave key, so it needs no root: the
-/// daemon runs it as the vault's account. The restored vault starts its own line of backups.
+/// a new vault id. The restored vault starts its own line of backups.
 pub fn restore(
     paths: &Paths,
-    se_public: &SePublic,
     file: Option<(String, Vec<u8>)>,
     default_mirror_dir: &Path,
     typed: SecretValue,
 ) -> Result<(Vault, RestoreReport), VaultError> {
-    check_auto_login()?;
-    if store::vault_exists(paths) || keyprotect::wrapped_exists(&paths.dir) {
+    if store::vault_exists(paths) || keyprotect::key_exists(&paths.dir) {
         return Err(VaultError::AlreadyInitialized);
     }
     let from_restore_point = file.is_none();
@@ -601,7 +580,7 @@ pub fn restore(
     let (check_secret, _) = backup::new_identity();
     let vault_id = store::new_vault_id()?;
     let key = SecretValue::random(32)?;
-    keyprotect::wrap_and_store(se_public, &paths.dir, &key)?;
+    keyprotect::store_new(&paths.dir, &key)?;
 
     let secrets = payload.records.iter().map(Record::summary).collect();
     let mut doc = VaultDoc {

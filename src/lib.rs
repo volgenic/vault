@@ -1,10 +1,10 @@
-//! The vault's library. Decisions live here as functions over plain values; the Secure Enclave
-//! code stays behind one small key-protection module (`keyprotect`), so the rest can build on
-//! Linux later. The vault never uses the Keychain, so it never raises a Keychain dialog.
+//! The vault's library. Decisions live here as functions over plain values. The vault key is a
+//! mode-0600 file next to the vault file (`keyprotect`): no Secure Enclave, no Keychain, so the
+//! vault never raises a dialog.
 //!
-//! The vault runs as its own macOS account, `_volgenicvault`: a root-started daemon
-//! (`server`) that unwraps the vault key and drops root, a command-line tool that only talks
-//! to it (`client`), the installer (`install`) and the owner's backup mirror (`mirror`).
+//! The vault runs as the owner: a daemon (`server`) started by a LaunchAgent in his login, a
+//! command-line tool that only talks to it (`client`), the installer (`install`) and the
+//! optional backup mirror (`mirror`).
 //!
 //! The rules this code follows are numbered on the threat model page,
 //! https://volgenic.com/pages/4171d207-a31e-4d38-b659-60ceed9ee5fd, and cited as R1, R2, ...
@@ -31,8 +31,7 @@ pub mod vault;
 /// The vault's version, from Cargo.toml.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The git commit this build came from (set by build.rs; "unknown" outside a checkout), printed
-/// by `install-system` so the owner can check what is about to run as root (R3).
+/// The git commit this build came from (set by build.rs; "unknown" outside a checkout).
 pub const GIT_COMMIT: &str = env!("VAULT_GIT_COMMIT");
 
 /// Now, as RFC 3339 in UTC, to the second.
