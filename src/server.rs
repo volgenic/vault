@@ -24,6 +24,7 @@ use crate::audit::{self, AuditEvent};
 use crate::backup;
 use crate::secret::WipingBuf;
 use crate::error::VaultError;
+use crate::fill;
 use crate::health::HealthBook;
 use crate::keyprotect;
 use crate::kinds::{self, HealthState, Refresher, Renewed};
@@ -688,6 +689,16 @@ impl Server {
                 };
                 self.sign_cancel(stream, peer, &secret, &args)
             }
+            Request::Fill { secret, origin, fields, engine, tab, on_behalf_of } => {
+                let notes = [fill::note(engine), fill::note(tab), fill::note(on_behalf_of)];
+                self.fill(stream, peer, &secret, &origin, &fields, &notes)
+            }
+            Request::GenerateLogin { name, site, username, length } => {
+                let result = self
+                    .with_vault(|vault| vault.generate_login(&name, &site, &username, length))
+                    .map(|(secret, backup)| AddReply { ok: true, secret, backup });
+                self.finish(stream, peer, "generate-login", Some(&name), result)
+            }
             Request::WalletCreate { name, chain, caps, recovery_key } => {
                 let result = wallet::Chain::parse(&chain).and_then(|chain| {
                     self.with_vault(|vault| vault.create_wallet(&name, chain, caps, recovery_key))
@@ -895,6 +906,54 @@ impl Server {
                 if let VaultError::NotLeasable(names) = &error {
                     event.name = Some(names.join(", "));
                 }
+                self.audit(with_peer(event, peer));
+                error_reply(out, peer, &error)
+            }
+        }
+    }
+
+    /// `fill` (#7663, R37): a login's values for the browser engine that types them, only when the
+    /// frame holding the fields is `https:` on the login's registrable domain. The `fill` line
+    /// (the login's name and id, the fields, the frame's host, the engine, the tab, for whom, the
+    /// caller) is flushed to disk before the answer leaves (R28); no line, no values. A refusal is
+    /// one `fill denied: <code>` line. The reply is written by hand into a wiped buffer (R1).
+    fn fill(
+        &self,
+        out: &mut UnixStream,
+        peer: &Caller,
+        secret: &SecretRef,
+        origin: &str,
+        fields: &[String],
+        notes: &[Option<String>; 3],
+    ) -> std::io::Result<()> {
+        let [engine, tab, on_behalf_of] = notes;
+        let result = (|| -> Result<WipingBuf, VaultError> {
+            let fields = fill::parse_fields(fields)?;
+            let doc = self.snapshot()?;
+            let record = doc.find_ref(secret);
+            let matched = fill::check(record, &secret.label(), origin)?;
+            let record = record.ok_or(VaultError::VaultFileCorrupt)?;
+            let line = fill::reply_line(record, &fields, &matched, &peer.envelope)?;
+            let mut event = AuditEvent::named("fill", &record.name, "ok");
+            event.secret_id = Some(record.id.clone());
+            event.host = Some(matched.host.clone());
+            event.detail = Some(fill::describe(&fields, &matched, engine.as_deref(), tab.as_deref(), on_behalf_of.as_deref()));
+            self.record(with_peer(event, peer))?;
+            Ok(line)
+        })();
+        match result {
+            Ok(line) => {
+                out.write_all(line.as_slice())?;
+                out.flush()
+            }
+            Err(error) => {
+                let mut event = AuditEvent::new("fill", &format!("denied: {}", error.code()));
+                event.name = Some(secret.label());
+                let mut detail = error.to_string();
+                for note in [engine, tab, on_behalf_of].into_iter().flatten() {
+                    detail.push_str(&format!("; {note}"));
+                }
+                event.detail = Some(detail);
                 self.audit(with_peer(event, peer));
                 error_reply(out, peer, &error)
             }

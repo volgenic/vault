@@ -37,6 +37,44 @@ impl SecretValue {
         Ok(SecretValue::from_vec(bytes))
     }
 
+    /// A new random password for a sign-up (`generate_login`, #7663): `length` characters from
+    /// letters, digits and ten punctuation marks most sites accept. It has at least one character
+    /// of each kind, because many sites demand that. Every character is uniform over the alphabet
+    /// (rejection sampling of random bytes). It is made straight into wiped buffers and exists
+    /// nowhere but the vault, its backups and the page a fill types it into.
+    pub fn random_password(length: usize) -> Result<Self, crate::error::VaultError> {
+        use zeroize::Zeroizing;
+        const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+        const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const DIGITS: &[u8] = b"0123456789";
+        const SYMBOLS: &[u8] = b"!#%+-.=?@_";
+        let mut alphabet = Vec::with_capacity(72);
+        for set in [LOWER, UPPER, DIGITS, SYMBOLS] {
+            alphabet.extend_from_slice(set);
+        }
+        // The largest multiple of the alphabet's size that fits in a byte: bytes at or above it
+        // are thrown away, so no character is likelier than another.
+        let limit = 256 - 256 % alphabet.len();
+        let mut password = Zeroizing::new(Vec::with_capacity(length));
+        let mut random = Zeroizing::new([0u8; 64]);
+        for _ in 0..1000 {
+            password.clear();
+            while password.len() < length {
+                getrandom::getrandom(&mut random[..]).map_err(|_| crate::error::VaultError::Random)?;
+                for &byte in random.iter() {
+                    if (byte as usize) < limit && password.len() < length {
+                        password.push(alphabet[byte as usize % alphabet.len()]);
+                    }
+                }
+            }
+            let has = |set: &[u8]| password.iter().any(|c| set.contains(c));
+            if has(LOWER) && has(UPPER) && has(DIGITS) && has(SYMBOLS) {
+                return Ok(SecretValue::from_vec(std::mem::take(&mut *password)));
+            }
+        }
+        Err(crate::error::VaultError::Random)
+    }
+
     pub fn len(&self) -> usize {
         self.bytes.len()
     }

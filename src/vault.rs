@@ -387,6 +387,49 @@ impl Vault {
     /// secret already stored under that name, which must be of the same kind: its id stays, and
     /// its version goes up by one. Returns whether it replaced one (`add_sealed`, R40).
     pub fn put(&mut self, new: NewSecret, replace: bool) -> Result<(SecretSummary, BackupStatus, bool), VaultError> {
+        self.put_as(new, replace, None)
+    }
+
+    /// The default length of a generated password: about 123 bits.
+    pub const GENERATED_LENGTH: usize = 20;
+
+    /// Stores a new login whose password the vault makes itself (`generate_login`, R38, #7663),
+    /// through `add`'s checks, backup and audit, under its own `generate-login` line. The site is
+    /// stored as the host it names, and must have a registrable domain, so the login can be
+    /// filled. A name already in the vault is refused (`name_taken`). No value is answered.
+    pub fn generate_login(
+        &mut self,
+        name: &str,
+        site: &str,
+        username: &str,
+        length: Option<usize>,
+    ) -> Result<(SecretSummary, BackupStatus), VaultError> {
+        let length = length.unwrap_or(Self::GENERATED_LENGTH);
+        if !(12..=128).contains(&length) {
+            return Err(VaultError::BadRequest("length is 12 to 128 characters".into()));
+        }
+        let site = crate::sites::normalize_new_site(site)?;
+        let new = NewSecret {
+            name: name.to_string(),
+            kind: Kind::Login,
+            site,
+            rule: None,
+            username: Some(username.to_string()),
+            app: None,
+            leasable: false,
+            value: SecretValue::random_password(length)?,
+        };
+        let made = format!("password of {length} characters made by the vault");
+        self.put_as(new, false, Some(("generate-login", made))).map(|(summary, status, _)| (summary, status))
+    }
+
+    /// `put`, with the audit line's event and an addition to its detail when the caller names them.
+    fn put_as(
+        &mut self,
+        new: NewSecret,
+        replace: bool,
+        event_as: Option<(&str, String)>,
+    ) -> Result<(SecretSummary, BackupStatus, bool), VaultError> {
         self.reload()?;
         self.ready_for_change()?;
         let name = new.name.clone();
@@ -412,9 +455,13 @@ impl Vault {
         self.check_fits()?;
         let record = self.doc.find(&name).ok_or(VaultError::VaultFileCorrupt)?;
         let summary = record.summary();
-        let mut event = AuditEvent::named(if replaced { "replace" } else { "add" }, &record.name, "ok");
+        let (event_name, detail) = match event_as {
+            Some((event_name, more)) => (event_name, format!("{}; {more}", describe(record))),
+            None => (if replaced { "replace" } else { "add" }, describe(record)),
+        };
+        let mut event = AuditEvent::named(event_name, &record.name, "ok");
         event.secret_id = Some(record.id.clone());
-        event.detail = Some(describe(record));
+        event.detail = Some(detail);
         let status = self.commit(event)?;
         Ok((summary, status, replaced))
     }

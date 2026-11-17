@@ -73,6 +73,10 @@ pub enum VaultError {
     NotLeasable(Vec<String>),
     /// `sign` would pass one of the wallet's caps (which, and by how much): nothing was signed.
     OverCap(String),
+    /// `fill` named a secret that isn't a login (its name or id as given).
+    NoSuchLogin(String),
+    /// `fill`'s frame isn't `https:` on the login's registrable domain (why, never a value).
+    SiteMismatch(String),
 }
 
 impl VaultError {
@@ -126,6 +130,8 @@ impl VaultError {
             IdleTimeout(_) => "idle_timeout",
             NotLeasable(_) => "not_leasable",
             OverCap(_) => "over_cap",
+            NoSuchLogin(_) => "no_such_login",
+            SiteMismatch(_) => "site_mismatch",
         }
     }
 }
@@ -213,6 +219,8 @@ impl fmt::Display for VaultError {
                 names.iter().map(|name| format!("{name:?}")).collect::<Vec<_>>().join(", ")
             ),
             OverCap(why) => write!(f, "not signed: {why}; only the person at the vault's {MACHINE} can raise a wallet's caps"),
+            NoSuchLogin(name) => write!(f, "no saved login {name:?}"),
+            SiteMismatch(why) => write!(f, "not the login's site, so nothing was filled: {why}"),
         }
     }
 }

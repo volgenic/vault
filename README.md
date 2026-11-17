@@ -9,8 +9,9 @@ an API call and gets the API's reply; the vault adds the key on the way out. An 
 2FA code and gets the six digits, never the seed. The host's model proxy sends a model call
 naming a Claude plan, and the vault adds the plan's token and streams the reply back as it
 arrives. Nothing the vault returns, to an agent or on the command line, can carry a secret value,
-with one exception: a build's `lease`, an app secret's value sealed to that build's own key for at
-most a day ("App secrets and leases" below). A wallet's key is made inside the vault and never
+with two exceptions: a build's `lease`, an app secret's value sealed to that build's own key for at
+most a day ("App secrets and leases" below), and a `fill`, a saved login handed to the browser
+engine that types it into a page on that login's own site ("Logins in the browser" below). A wallet's key is made inside the vault and never
 leaves it at all; agents' payments get the vault's signature, within caps only you set
 ("Wallets" below).
 
@@ -90,10 +91,10 @@ From a release, with no Rust toolchain (the Linux builds are static; see
 [docs/releasing.md](docs/releasing.md) for every target and how releases are made):
 
 ```sh
-curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.4.0/vault-0.4.0-x86_64-unknown-linux-musl.tar.gz
-curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.4.0/SHA256SUMS
+curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.5.0/vault-0.5.0-x86_64-unknown-linux-musl.tar.gz
+curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.5.0/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
-tar xzf vault-0.4.0-x86_64-unknown-linux-musl.tar.gz && vault-0.4.0-x86_64-unknown-linux-musl/vault install
+tar xzf vault-0.5.0-x86_64-unknown-linux-musl.tar.gz && vault-0.5.0-x86_64-unknown-linux-musl/vault install
 ```
 
 Or from source:
@@ -140,7 +141,7 @@ The `vault` tool can't print a secret, so it is safe for any agent on the machin
 |---|---|
 | `vault install [--for-restore] [--json]` | Installs or updates the vault for your user. `--json`: one JSON object instead of prose, for a program ([docs/json.md](docs/json.md)). |
 | `vault add NAME --kind api-key --host HOST --method GET --path /v1 --header "Authorization: Bearer {key}"` | Adds an API key with its rule. The value is read at a hidden prompt, or from standard input with `--yes`. |
-| `vault add NAME --kind login --site SITE --username USER` | Adds a login. Stored and listed only, for now. |
+| `vault add NAME --kind login --site SITE --username USER` | Adds a login. The in-app browser fills it into a page on that site; see "Logins in the browser" below. |
 | `vault add NAME --kind 2fa --site SITE` | Adds a 2FA seed: base32, or an `otpauth://` link. |
 | `vault add NAME --kind claude_plan` | Adds a Claude plan's token (from `claude setup-token`). Used only by `stream`, only to `api.anthropic.com`. The host's daemon normally stores plans itself (`import_plan`, `add_sealed`). |
 | `vault add NAME --kind codex_login --yes < auth.json` | Adds a Codex login (its `auth.json`, whole), which the vault alone renews from then on. Used only by `stream`, only to `chatgpt.com`. `grok_login` likewise for Grok Build, to `cli-chat-proxy.grok.com`. The host's daemon normally hands logins over itself (`import_login` and `claim_refresh`, or `add_sealed`). |
@@ -248,6 +249,8 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   A sealed app secret carries its `app` and, to be leasable, `"leasable":true`
   (`{"v":1,"name":"shop-npm","kind":"app_secret","app":"shop","leasable":true,"value":"npm_..."}`);
   only an `app_secret` may carry either, and it too is added under a new name only.
+- **`fill`** and **`generate_login`** are for the browser engines that type a saved login into a
+  page, and make sign-up passwords ("Logins in the browser" below).
 - **`lease`** seals app secrets to a build's own key (host only; "App secrets and leases" below).
 - **`sign`** signs one token payment from a wallet, within its caps, on Ethereum with a ladder of
   fee bumps, or on Ethereum with `"cancel":true` a 0-ETH cancel at a payment's nonce (the host's
@@ -268,6 +271,52 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   command-line tool and the mirror send; `src/protocol.rs` lists them.
 - Errors are `{"ok":false,"error":"rule_mismatch","message":"..."}`; `not_leasable` adds
   `"names"`. `sign` over a cap answers `over_cap`.
+
+## Logins in the browser
+
+Agents sign in with your saved logins in Volgenic for Mac's in-app browser (and the host daemon's
+Chrome) without ever seeing a password (work item #7663). The agent names a login and the page's
+fields; the engine that types asks the vault itself, and the agent gets back only what was filled.
+Neither the host daemon (for an app tab), Volgenic's server nor the agent holds the password.
+
+- **`fill`**, from the engine about to type:
+
+  ```json
+  {"op":"fill","name":"acme-shop","origin":"https://accounts.acme.com","fields":["username","password"],
+   "engine":"app","tab":"w3","on_behalf_of":"agent @x","protocol":2,"request_id":"f1"}
+  ```
+
+  `name` or `id`. `origin` is the scheme, host and port of the frame that holds the fields, as the
+  browser reports it (WebKit's `WKFrameInfo.securityOrigin`, Chrome's frame tree), never from the
+  page's own scripts. `fields` is `username`, `password` or both, so a two-step sign-in can fill
+  the username on one page and the password on the next. `engine`, `tab` and `on_behalf_of` go to
+  the audit line only.
+  - **Refused** unless the name is a login (`no_such_login`), and the origin is `https:` with the
+    same registrable domain as the login's site (`site_mismatch`): one label below a public suffix,
+    from the Public Suffix List compiled in, so `accounts.shopify.com` is `shopify.com`'s site and
+    `alice.github.io` isn't `bob.github.io`'s. An IP address, `localhost` or a bare public suffix
+    is never a site.
+  - **Audited** before the answer leaves: one `fill` line with the login's name and id, the frame's
+    host, the fields, the engine, the tab, for whom and the caller's program, flushed to disk. No
+    line, no values (`audit_unavailable`). A refusal is a `fill denied: <code>` line.
+  - **Answers** `{"ok":true,"name","id","site","site_matched":"acme.com","values":{"username":"...","password":"..."}}`,
+    only the fields asked for. The engine types them into the page and nowhere else: never into a
+    log, a result, an error or anything the daemon or the agent sees.
+- **`generate_login`** makes a sign-up's password: `{"op":"generate_login","name":"acme-shop","site":"acme.com","username":"sales@example.com","length":20}`.
+  The vault makes a random password (`length` 12 to 128, 20 by default: letters, digits and
+  `! # % + - . = ? @ _`, at least one of each), stores it as a login for the site's host with that
+  username, backs up and audits (`generate-login`), and answers `add`'s reply, never the password:
+  `{"ok":true,"secret":{"id","name","kind":"login","site","version":1},"backup":{...}}`. A name
+  already in the vault is `name_taken`; a site with no registrable domain, `invalid_secret`. Then
+  `fill` types it into the sign-up form (and into a "confirm password" field, with
+  `"fields":["password"]`).
+
+**What this accepts.** The vault can't tell Volgenic for Mac from any other program running as
+you, so any such program can ask `fill` for a login by naming an origin on its site. That is no
+more than it can already do by reading the vault's key file; the vault keeps passwords out of
+agents' normal path, and every fill is an audit line naming the program that asked. Agents in
+containers can't reach the socket at all. When Volgenic for Mac is signed with a team's Developer
+ID and the hardened runtime, `fill` can require that signature of its caller.
 
 ## Handing over a Codex or Grok login
 

@@ -45,6 +45,18 @@
 //! secret it holds that may not be leased refuses the whole request:
 //! `{"ok":false,"error":"not_leasable","message","names":[...]}`.
 //!
+//! For the browser engines that type a saved login into a page, Volgenic for Mac's and the host
+//! daemon's Chrome (#7663, R37, R38):
+//!   {"op":"fill","name":"acme-shop","origin":"https://accounts.acme.com","fields":["username","password"],
+//!    "engine":"app","tab":"w3","on_behalf_of":"agent @x"}         (or "id"; the last three optional)
+//!   {"op":"generate_login","name":"acme-shop","site":"acme.com","username":"sales@example.com","length":20}
+//!
+//! **`fill`** answers the login's values, in clear, only when `origin` (the frame holding the
+//! fields, as the browser reports it) is `https:` on the login's registrable domain, and only
+//! after its audit line is on disk: `{"ok":true,"name","id","site","site_matched","values":
+//! {"username"?,"password"?}}` (`fill`). **`generate_login`** stores a login with a password the
+//! vault makes, and answers `{"ok":true,"secret":{...},"backup":{...}}`, never the password.
+//!
 //! For the host daemon's payment relay (#7440, #7490), and the command line for the two that need
 //! the recovery key:
 //!   {"op":"sign","name":"main-wallet","chain":"ethereum","token":"USDC",
@@ -114,9 +126,11 @@
 //! are its own user's (R22, R27).
 //!
 //! No reply type has a field that could carry a secret value (R4): `SecretValue` doesn't
-//! implement `Serialize`, so it can't appear in any of them. The one exception is ciphertext:
-//! `lease` answers app secrets sealed to the job's own key (`lease::seal`), which only that key
-//! opens. A wallet's key is in no reply at all, sealed or not; `sign` answers signatures.
+//! implement `Serialize`, so it can't appear in any of them. Two exceptions are written by hand,
+//! never through a reply type: `lease` answers app secrets sealed to the job's own key
+//! (`lease::seal`), which only that key opens, and `fill` answers a login's values to the browser
+//! engine that types them, once the page's site matches (`fill::reply_line`). A wallet's key is
+//! in no reply at all, sealed or not; `sign` answers signatures.
 
 use std::collections::BTreeMap;
 
@@ -305,6 +319,24 @@ pub enum Request {
         ladder: usize,
         ladder_max_fee_per_gas: Option<u64>,
         on_behalf_of: Option<String>,
+    },
+    /// A browser engine asks for a login's values to type (#7663).
+    Fill {
+        secret: SecretRef,
+        /// The origin of the frame that holds the fields, as the browser reports it.
+        origin: String,
+        fields: Vec<String>,
+        /// For the audit line only: which engine, which tab, for whom.
+        engine: Option<String>,
+        tab: Option<String>,
+        on_behalf_of: Option<String>,
+    },
+    /// A new login with a password the vault makes (#7663).
+    GenerateLogin {
+        name: String,
+        site: String,
+        username: String,
+        length: Option<usize>,
     },
     WalletCreate {
         name: String,
@@ -501,6 +533,31 @@ pub fn parse_request(line: &[u8]) -> Result<Request, serde_json::Error> {
         #[serde(default)]
         ids: Vec<String>,
         ttl_seconds: u64,
+    }
+
+    #[derive(Deserialize)]
+    struct FillWire {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        id: Option<String>,
+        origin: String,
+        fields: Vec<String>,
+        #[serde(default)]
+        engine: Option<String>,
+        #[serde(default)]
+        tab: Option<String>,
+        #[serde(default)]
+        on_behalf_of: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct GenerateLoginWire {
+        name: String,
+        site: String,
+        username: String,
+        #[serde(default)]
+        length: Option<usize>,
     }
 
     #[derive(Deserialize)]
@@ -711,6 +768,21 @@ pub fn parse_request(line: &[u8]) -> Result<Request, serde_json::Error> {
                 }
             }
             Request::Sign { secret, fields }
+        }
+        "fill" => {
+            let w: FillWire = serde_json::from_slice(line)?;
+            Request::Fill {
+                secret: secret_ref(w.name, w.id)?,
+                origin: w.origin,
+                fields: w.fields,
+                engine: w.engine,
+                tab: w.tab,
+                on_behalf_of: w.on_behalf_of,
+            }
+        }
+        "generate_login" => {
+            let w: GenerateLoginWire = serde_json::from_slice(line)?;
+            Request::GenerateLogin { name: w.name, site: w.site, username: w.username, length: w.length }
         }
         "wallet_create" => {
             let w: WalletCreateWire = serde_json::from_slice(line)?;
