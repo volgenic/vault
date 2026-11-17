@@ -42,12 +42,17 @@ pub fn login_domain(site: &str) -> Result<String, VaultError> {
 /// Checks that `origin`, the origin of the frame holding the fields as the browser reports it
 /// (`https://accounts.example.com`, maybe with a port), is `https:` and on `domain`. Answers the
 /// origin's host, for the audit line. Anything after the origin (a path, a query) is refused, so
-/// a caller can't slip a query into the audit log.
+/// a caller can't slip a query into the audit log, and so is a user name or password before the
+/// host (`https://user:pw@host`), which no origin has and which would otherwise be quoted in a
+/// refusal and its audit line.
 pub fn check_origin(origin: &str, domain: &str) -> Result<String, VaultError> {
     let refused = |why: String| Err(VaultError::SiteMismatch(why));
     let Ok(parsed) = Url::parse(origin.trim()) else {
         return refused(format!("the page's origin {:?} isn't a web address", shown(origin)));
     };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(VaultError::BadRequest("origin is a scheme, host and port only, with no user name or password".into()));
+    }
     if parsed.scheme() != "https" {
         return refused(format!("the page isn't https ({:?})", shown(origin)));
     }
@@ -75,9 +80,22 @@ pub fn normalize_new_site(site: &str) -> Result<String, VaultError> {
     Ok(host)
 }
 
-/// Text a refusal may quote: no query or fragment (a query can carry a token), no control
-/// characters, at most 120 characters.
+/// Text a refusal may quote: no query or fragment (a query can carry a token), no user name or
+/// password before the host (`user:pw@`), no control characters, at most 120 characters.
 fn shown(text: &str) -> String {
     let cut = text.split(['?', '#']).next().unwrap_or("");
+    let (scheme, rest) = match cut.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, cut),
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let rest = match rest[..authority_end].rfind('@') {
+        Some(at) => &rest[at + 1..],
+        None => rest,
+    };
+    let cut = match scheme {
+        Some(scheme) => format!("{scheme}://{rest}"),
+        None => rest.to_string(),
+    };
     cut.chars().filter(|c| !c.is_control()).take(120).collect()
 }
