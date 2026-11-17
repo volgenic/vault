@@ -11,12 +11,14 @@
 //! on the way out. A request for a newer protocol than the daemon's is refused with
 //! `unsupported_protocol`.
 //!
-//! **Naming a secret.** `totp`, `proxy`, `delete` and `rename` take `"name"` or `"id"` (the
-//! secret's stable id from `list`), exactly one of them.
+//! **Naming a secret.** `totp`, `reveal`, `proxy`, `delete`, `rename` and `set_password` take
+//! `"name"` or `"id"` (the secret's stable id from `list`), exactly one of them.
 //!
 //! For agents:
 //!   {"op":"list"}
 //!   {"op":"totp","name":"github-2fa"}                  (or "id":"<32 hex digits>")
+//!   {"op":"reveal","name":"sales-gmail","reason":"sign in to Gmail for item #123",
+//!    "caller":"agent @x"}                                  (or "id"; caller optional)
 //!   {"op":"proxy","name":"openai","method":"GET","path":"/v1/models",
 //!    "headers":{"accept":"application/json"},"body":"..."}            (or "body_base64")
 //!   {"op":"proxy","name":"openai","host":"api.openai.com","port":443,"method":"GET",
@@ -24,6 +26,13 @@
 //!   {"op":"stream","name":"main","method":"POST","path":"/v1/messages?beta=true",
 //!    "headers":[["anthropic-version","2023-06-01"]],"body_len":1234}  then 1234 body bytes
 //!   {"op":"health"}
+//!
+//! **`reveal`** (#7666, `reveal`) gives back a `login`'s password or an `api-key`'s value, the one
+//! deliberate exception to R4, and only with a reason:
+//! `{"ok":true,"id","name","kind","site","version","username","value"}` (`username` null for an
+//! API key; `value_base64` in place of `value` for a value that isn't UTF-8 text). Its audit line,
+//! with the reason and the caller, is written before the reply (`audit_unavailable` when it can't
+//! be). Another kind is `wrong_kind`; a missing or empty reason is `bad_request`.
 //!
 //! **`proxy`'s destination.** The key's rule alone decides where a `proxy` call goes. A caller
 //! may name the destination it meant, `host` (compared case-insensitively) and `port` (a number
@@ -100,6 +109,8 @@
 //!
 //! For the command-line tool (R13: only the daemon changes the vault; R26):
 //!   status, audit, add, delete, rename, confirm-kit, reset, restore,
+//!   set_password   {"op":"set_password","name":"sales-gmail","value":"..."}: replaces a login's
+//!                  password, keeping its id, username and site; its version goes up by one
 //!   backup         write this generation's backup if it isn't written yet, and verify it
 //!   verify-backup  decrypt the newest backup with the check key and compare it
 //!   read-backup    the newest backup's encrypted bytes, for checks with the recovery key
@@ -109,14 +120,16 @@
 //!
 //! `restore` with a file sends the file's bytes right after its request line, as they are.
 //!
-//! `add`, `confirm-kit`, `reset` and `restore` carry a typed value or the recovery key. The
-//! command-line tool sends them only after checking that the socket and the process behind it
-//! are its own user's (R22, R27).
+//! `add`, `set_password`, `confirm-kit`, `reset` and `restore` carry a typed value or the
+//! recovery key. The command-line tool sends them only after checking that the socket and the
+//! process behind it are its own user's (R22, R27).
 //!
 //! No reply type has a field that could carry a secret value (R4): `SecretValue` doesn't
-//! implement `Serialize`, so it can't appear in any of them. The one exception is ciphertext:
-//! `lease` answers app secrets sealed to the job's own key (`lease::seal`), which only that key
-//! opens. A wallet's key is in no reply at all, sealed or not; `sign` answers signatures.
+//! implement `Serialize`, so it can't appear in any of them. Two exceptions: `lease` answers app
+//! secrets sealed to the job's own key (`lease::seal`), which only that key opens; and `reveal`
+//! (`reveal::RevealReply`) answers a login's password or an API key's value in plain text, with a
+//! reason, audited first (#7666). A wallet's key is in no reply at all, sealed or not; `sign`
+//! answers signatures.
 
 use std::collections::BTreeMap;
 
@@ -237,6 +250,18 @@ pub enum Request {
     List,
     Totp {
         secret: SecretRef,
+    },
+    /// A login's password or an API key's value (#7666). `reason` is required (`reveal::check_request`);
+    /// both are read as given so a missing one is refused with its own message.
+    Reveal {
+        secret: SecretRef,
+        reason: Option<String>,
+        caller: Option<String>,
+    },
+    /// Replaces a login's password (#7666).
+    SetPassword {
+        secret: SecretRef,
+        value: SecretValue,
     },
     Proxy {
         secret: SecretRef,
@@ -390,6 +415,25 @@ pub fn parse_request(line: &[u8]) -> Result<Request, serde_json::Error> {
     #[derive(Deserialize)]
     struct RenameWire {
         new_name: String,
+    }
+
+    #[derive(Deserialize)]
+    struct RevealWire {
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        caller: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct SetPasswordWire {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        id: Option<String>,
+        /// A JSON string or an array of bytes, read straight into a wiping buffer (R1).
+        #[serde(deserialize_with = "secret_bytes::deserialize")]
+        value: SecretValue,
     }
 
     #[derive(Deserialize)]
@@ -609,6 +653,14 @@ pub fn parse_request(line: &[u8]) -> Result<Request, serde_json::Error> {
         "read-backup" => Request::ReadBackup,
         "mirror-plan" => Request::MirrorPlan,
         "totp" => Request::Totp { secret: named(line)? },
+        "reveal" => {
+            let w: RevealWire = serde_json::from_slice(line)?;
+            Request::Reveal { secret: named(line)?, reason: w.reason, caller: w.caller }
+        }
+        "set_password" => {
+            let w: SetPasswordWire = serde_json::from_slice(line)?;
+            Request::SetPassword { secret: secret_ref(w.name, w.id)?, value: w.value }
+        }
         "delete" => Request::Delete { secret: named(line)? },
         "rename" => Request::Rename {
             secret: named(line)?,
@@ -795,6 +847,15 @@ pub(crate) enum SecretRequest<'a> {
         caps: &'a crate::wallet::Caps,
         #[serde(serialize_with = "secret_bytes::serialize_ref")]
         recovery_key: &'a SecretValue,
+    },
+    #[serde(rename = "set_password")]
+    SetPassword {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<&'a str>,
+        #[serde(serialize_with = "secret_bytes::serialize_ref")]
+        value: &'a SecretValue,
     },
     Reset {
         #[serde(serialize_with = "secret_bytes::serialize_opt_ref")]

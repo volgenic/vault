@@ -1,7 +1,8 @@
 //! The vault's operations. They run only in the daemon (a LaunchAgent in the owner's login on
 //! macOS, a systemd user service on Linux) and in `vault install` for the first vault (R13). The command-line tool
 //! never opens the vault; it asks the daemon. Nothing here returns a secret value: results are
-//! summaries, codes, statuses and reports (R4).
+//! summaries, codes, statuses and reports (R4). The one exception, `reveal` (#7666), reads the
+//! daemon's snapshot itself (`crate::reveal`).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -1061,6 +1062,35 @@ impl Vault {
         let mut event = AuditEvent::named("rename", &old_name, "ok");
         event.secret_id = Some(summary.id.clone());
         event.detail = Some(format!("renamed to {new_name:?}, version {}", summary.version));
+        let status = self.commit(event)?;
+        Ok((summary, status))
+    }
+
+    /// Replaces a login's password (#7666): its id, username and site stay, its version goes up
+    /// by one. Earlier backups keep the old one. `wrong_kind` for anything but a login.
+    pub fn set_password(&mut self, secret: &SecretRef, value: SecretValue) -> Result<(SecretSummary, BackupStatus), VaultError> {
+        self.reload()?;
+        self.ready_for_change()?;
+        if value.is_empty() || value.len() > 16 * 1024 {
+            return Err(VaultError::InvalidSecret("the password must be 1 byte to 16 KiB".into()));
+        }
+        let now = crate::now_rfc3339();
+        let record = match secret {
+            SecretRef::Name(name) => self.doc.records.iter_mut().find(|record| &record.name == name),
+            SecretRef::Id(id) => self.doc.records.iter_mut().find(|record| &record.id == id),
+        }
+        .ok_or_else(|| secret.not_found())?;
+        if record.kind != Kind::Login {
+            return Err(VaultError::WrongKind);
+        }
+        record.value = value;
+        record.version += 1;
+        record.updated_at = Some(now);
+        let summary = record.summary();
+        self.check_fits()?;
+        let mut event = AuditEvent::named("set-password", &summary.name, "ok");
+        event.secret_id = Some(summary.id.clone());
+        event.detail = Some(format!("password replaced, version {}", summary.version));
         let status = self.commit(event)?;
         Ok((summary, status))
     }

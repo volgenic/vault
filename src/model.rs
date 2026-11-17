@@ -17,10 +17,12 @@ use crate::totp::TotpParams;
 /// caller with a credential of their own (a Claude plan today) are described in `kinds`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// Used only by the proxy, in the auth header its rule names.
+    /// Used only by the proxy, in the auth header its rule names; given back only by `reveal`,
+    /// for a reason, audited first (#7666).
     #[serde(rename = "api-key")]
     ApiKey,
-    /// Stored and listed only, in this item.
+    /// A website login: stored and listed with its username; its password is given back only by
+    /// `reveal`, for a reason, audited first, and replaced by `set_password` (#7666).
     #[serde(rename = "login")]
     Login,
     /// A 2FA (TOTP) seed: used only to make the current code.
@@ -92,7 +94,8 @@ impl Kind {
     }
 }
 
-/// What a listing shows: the secret's stable id and version, name, kind and site, nothing else.
+/// What a listing shows: the secret's stable id and version, name, kind and site, and a login's
+/// username; never a value.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SecretSummary {
     /// Random, given when the secret is added; it never changes, through renames and restores.
@@ -102,9 +105,13 @@ pub struct SecretSummary {
     pub name: String,
     pub kind: Kind,
     pub site: String,
-    /// 1 when added, plus one for every change to this secret (a rename, today).
+    /// 1 when added, plus one for every change to this secret (a rename, a replaced value or a new
+    /// password).
     #[serde(default)]
     pub version: u64,
+    /// A login only: the username `add --username` stored (#7666). Never its password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
     /// Personal details only: which fields are filled (`details::FIELDS`), never their values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<String>>,
@@ -214,6 +221,7 @@ impl Record {
             kind: self.kind,
             site: self.site.clone(),
             version: self.version,
+            username: if self.kind == Kind::Login { self.username.clone() } else { None },
             fields: self.fields.clone(),
             app: self.app.clone(),
             leasable: if self.kind == Kind::AppSecret { Some(self.leasable == Some(true)) } else { None },

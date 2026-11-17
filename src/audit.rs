@@ -43,6 +43,13 @@ pub struct AuditEvent {
     pub peer_pid: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_program: Option<String>,
+    /// `reveal` only (#7666): why the caller asked for the value, in its own words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `reveal` only: who the caller says it is (an agent's handle, or `cli`). A hint like the
+    /// peer's program (R23), never a permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
     /// The id the caller gave its request (protocol 2), so a caller can match its own requests
     /// to lines here. The caller's own text: printable, at most 128 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,7 +97,7 @@ const RECENT_CHANGES: usize = 5;
 pub fn is_change(event: &str) -> bool {
     matches!(
         event,
-        "add" | "replace" | "import-plan" | "renew" | "delete" | "rename" | "restore" | "confirm-kit" | "init" | "reset"
+        "add" | "replace" | "set-password" | "import-plan" | "renew" | "delete" | "rename" | "restore" | "confirm-kit" | "init" | "reset"
             | "migrate"
     )
 }

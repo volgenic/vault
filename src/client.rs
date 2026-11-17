@@ -29,6 +29,7 @@ use crate::protocol::{
     OkReply, Outgoing, ReadBackupReply, RenameReply, ReplyFrame, ResetReply, RestoreReply, RuleInput, SecretRequest,
     StatusReply, VerifyBackupReply, WalletReply,
 };
+use crate::model::secret_bytes;
 use crate::secret::SecretValue;
 use crate::store::{self, Paths};
 
@@ -72,7 +73,8 @@ fn exchange(paths: &Paths, request: &[u8], payload: Option<&[u8]>, wait: Duratio
         stream.write_all(payload)?;
     }
     stream.flush()?;
-    let mut line = Vec::new();
+    // Sized up front so a reply that carries a value (`reveal`) isn't left behind by a reallocation.
+    let mut line = Vec::with_capacity(64 * 1024);
     BufReader::new(&stream).read_until(b'\n', &mut line)?;
     if line.is_empty() {
         return Err(VaultError::Daemon("the daemon closed the connection without a reply".into()));
@@ -174,6 +176,101 @@ pub fn rename(paths: &Paths, secret: &SecretRef, new_name: &str) -> Result<Renam
     request["op"] = json!("rename");
     request["new_name"] = json!(new_name);
     call(paths, request, CHANGE_WAIT)
+}
+
+/// What `reveal` gave the command line (#7666): the login's (or API key's) details and its value,
+/// held in a `SecretValue` and written out only by `print_value` or `copy_to_clipboard`.
+#[derive(serde::Deserialize)]
+pub struct Revealed {
+    pub id: String,
+    pub name: String,
+    pub kind: Kind,
+    pub site: String,
+    #[serde(default)]
+    pub version: u64,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default, deserialize_with = "secret_bytes::deserialize_opt")]
+    value: Option<SecretValue>,
+    #[serde(default, deserialize_with = "secret_bytes::deserialize_opt")]
+    value_base64: Option<SecretValue>,
+}
+
+impl Revealed {
+    /// The value's bytes, decoded from base64 when the daemon sent it that way. The reveal call
+    /// site of `expose` on the command line (R1): `vault show --password` and `--copy`.
+    fn bytes(&self) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        match (&self.value, &self.value_base64) {
+            (Some(value), _) => Ok(Zeroizing::new(value.expose().to_vec())),
+            (None, Some(encoded)) => BASE64
+                .decode(encoded.expose())
+                .map(Zeroizing::new)
+                .map_err(|_| VaultError::Daemon("the daemon sent an unreadable value".into())),
+            (None, None) => Err(VaultError::Daemon("the daemon's reply has no value".into())),
+        }
+    }
+
+    /// Writes the value, then a line break, to `out`.
+    pub fn print_value(&self, out: &mut impl Write) -> Result<(), VaultError> {
+        out.write_all(&self.bytes()?)?;
+        out.write_all(b"\n")?;
+        out.flush()?;
+        Ok(())
+    }
+
+    /// Puts the value on the clipboard: `pbcopy` on macOS; `wl-copy`, then `xclip`, then `xsel`
+    /// on Linux. Returns the program that took it.
+    pub fn copy_to_clipboard(&self) -> Result<&'static str, VaultError> {
+        let bytes = self.bytes()?;
+        let programs: &[(&'static str, &[&str])] = if cfg!(target_os = "macos") {
+            &[("pbcopy", &[])]
+        } else {
+            &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"])]
+        };
+        for (program, args) in programs {
+            let child = std::process::Command::new(program)
+                .args(*args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            let Ok(mut child) = child else { continue };
+            let wrote = child.stdin.take().map(|mut stdin| stdin.write_all(&bytes));
+            let status = child.wait()?;
+            if matches!(wrote, Some(Ok(()))) && status.success() {
+                return Ok(program);
+            }
+        }
+        Err(VaultError::Io(if cfg!(target_os = "macos") {
+            "pbcopy didn't take the value".into()
+        } else {
+            "no clipboard program worked (install wl-copy, xclip or xsel, or use --password)".into()
+        }))
+    }
+}
+
+/// `reveal` (#7666): a login's password or an API key's value, audited with `reason` and the
+/// caller `cli` before the daemon sends it. The reply line is wiped once read.
+pub fn reveal(paths: &Paths, secret: &SecretRef, reason: &str) -> Result<Revealed, VaultError> {
+    let mut request = secret_fields(secret);
+    request["op"] = json!("reveal");
+    request["reason"] = json!(reason);
+    request["caller"] = json!("cli");
+    let request_id = new_request_id();
+    request["protocol"] = json!(protocol::PROTOCOL_VERSION);
+    request["request_id"] = json!(request_id);
+    let bytes = serde_json::to_vec(&request).map_err(|_| VaultError::Io("request encoding".into()))?;
+    let line = Zeroizing::new(exchange(paths, &bytes, None, SHORT_WAIT)?);
+    parse(&line, &request_id)
+}
+
+/// Replaces a login's password (#7666), keeping its id, username and site.
+pub fn set_password(paths: &Paths, secret: &SecretRef, value: &SecretValue) -> Result<RenameReply, VaultError> {
+    let (name, id) = match secret {
+        SecretRef::Name(name) => (Some(name.as_str()), None),
+        SecretRef::Id(id) => (None, Some(id.as_str())),
+    };
+    call_secret(paths, &SecretRequest::SetPassword { name, id, value }, None, CHANGE_WAIT)
 }
 
 pub fn confirm_kit(paths: &Paths, recovery_key: &SecretValue) -> Result<ConfirmKitReply, VaultError> {

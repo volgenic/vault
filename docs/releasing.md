@@ -12,7 +12,7 @@ without a login) named `v<version>`, with one archive per target and a `SHA256SU
 
 Each archive holds one folder, `vault-<version>-<target>/`, with `vault`, `README.md` and
 `LICENSE`. `vault --version` names the version, the commit and the target, e.g.
-`vault 0.4.0 (commit 0b02167dfd80, x86_64-unknown-linux-musl)`.
+`vault 0.5.0 (commit 0b02167dfd80, x86_64-unknown-linux-musl)`.
 
 **The Linux builds are static.** They need no Rust toolchain, no OpenSSL and no particular libc,
 and run on glibc and musl distributions alike. The proxy's TLS is rustls with the system's root
@@ -57,11 +57,11 @@ and the like): a static binary finds them on Debian, Ubuntu, Fedora and Alpine t
 ## Installing from a release
 
 ```sh
-curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.4.0/vault-0.4.0-x86_64-unknown-linux-musl.tar.gz
-curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.4.0/SHA256SUMS
+curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.5.0/vault-0.5.0-x86_64-unknown-linux-musl.tar.gz
+curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.5.0/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
-tar xzf vault-0.4.0-x86_64-unknown-linux-musl.tar.gz
-vault-0.4.0-x86_64-unknown-linux-musl/vault install          # or: install --json, for a program
+tar xzf vault-0.5.0-x86_64-unknown-linux-musl.tar.gz
+vault-0.5.0-x86_64-unknown-linux-musl/vault install          # or: install --json, for a program
 ```
 
 `vault install` copies itself to `~/.local/share/volgenic/bin/vault` (Linux) or

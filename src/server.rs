@@ -36,6 +36,7 @@ use crate::protocol::{
     SignedTx, StatusReply, TotpReply, VerifyBackupReply, WalletReply,
 };
 use crate::proxy::{self, ProxyRequest};
+use crate::reveal;
 use crate::rules;
 use crate::store::{self, OwnerPaths, Paths};
 use crate::stream::{self, Streamer};
@@ -285,8 +286,20 @@ fn reply<T: serde::Serialize>(stream: &mut UnixStream, envelope: &Envelope, valu
     stream.flush()
 }
 
-/// Who sent a request: the peer (R22, R23) and the request's envelope (its protocol version and
-/// request id).
+/// A reply that carries a secret value (`reveal`, #7666): written into a buffer sized up front so
+/// it isn't reallocated, and wiped once sent (R1).
+fn reply_secret<T: serde::Serialize>(stream: &mut UnixStream, envelope: &Envelope, value: &T) -> std::io::Result<()> {
+    let framed = Framed { body: value, protocol: protocol::PROTOCOL_VERSION, request_id: envelope.request_id.as_ref() };
+    let mut line = Zeroizing::new(Vec::with_capacity(64 * 1024));
+    if serde_json::to_writer(&mut *line, &framed).is_err() {
+        line.clear();
+        line.extend_from_slice(b"{\"ok\":false,\"error\":\"encoding\"}");
+    }
+    line.push(b'\n');
+    stream.write_all(&line)?;
+    stream.flush()
+}
+
 /// A `stream` request, read.
 struct StreamCall {
     secret: SecretRef,
@@ -298,6 +311,8 @@ struct StreamCall {
     idle: u64,
 }
 
+/// Who sent a request: the peer (R22, R23) and the request's envelope (its protocol version and
+/// request id).
 struct Caller {
     peer: Peer,
     envelope: Envelope,
@@ -400,6 +415,56 @@ impl Server {
         }
     }
 
+    /// `reveal` (#7666): a login's password or an API key's value, for a reason. The audit line,
+    /// with the reason and the caller, is on disk before the value is sent; when it can't be
+    /// written nothing is sent (`audit_unavailable`, R28). A refusal is audited too, with the
+    /// reason as given. The value goes into the reply line only.
+    fn reveal(
+        &self,
+        stream: &mut UnixStream,
+        peer: &Caller,
+        secret: &SecretRef,
+        reason: Option<String>,
+        caller: Option<String>,
+    ) -> std::io::Result<()> {
+        let checked = reveal::check_request(reason.as_deref(), caller.as_deref());
+        let result = checked.clone().and_then(|(reason, caller)| {
+            let doc = self.snapshot()?;
+            let record = reveal::find(&doc, secret)?;
+            let mut event = AuditEvent::named("reveal", &record.name, "ok");
+            event.secret_id = Some(record.id.clone());
+            event.detail = Some(format!("{} {}", record.kind.label(), record.site));
+            event.reason = Some(reason);
+            event.caller = caller;
+            self.record(with_peer(event, peer))?;
+            Ok(doc)
+        });
+        match result {
+            // The snapshot can't change under us: `doc` is this request's own copy of it.
+            Ok(doc) => match reveal::find(&doc, secret) {
+                Ok(record) => reply_secret(stream, &peer.envelope, &reveal::RevealReply::of(record)),
+                Err(error) => error_reply(stream, peer, &error),
+            },
+            Err(error) => {
+                let mut event = AuditEvent::new("reveal", &format!("denied: {}", error.code()));
+                event.name = Some(secret.label());
+                match checked {
+                    Ok((reason, caller)) => {
+                        event.reason = Some(reason);
+                        event.caller = caller;
+                    }
+                    // Kept short and on one line in the log; the refusal says what was wrong.
+                    Err(_) => {
+                        event.reason = reason.map(|r| r.chars().filter(|c| !c.is_control()).take(reveal::MAX_REASON).collect());
+                        event.caller = caller.map(|c| c.chars().filter(|c| !c.is_control()).take(reveal::MAX_CALLER).collect());
+                    }
+                }
+                self.audit(with_peer(event, peer));
+                error_reply(stream, peer, &error)
+            }
+        }
+    }
+
     fn handle(&self, mut stream: UnixStream) {
         // R22: only the owner's user ID. R23: the caller's pid and program are a hint.
         let Some(peer) = platform::peer_of(stream.as_raw_fd()) else { return };
@@ -489,6 +554,13 @@ impl Server {
                     })
                 });
                 self.finish(stream, peer, "totp", Some(&secret.label()), result)
+            }
+            Request::Reveal { secret, reason, caller } => self.reveal(stream, peer, &secret, reason, caller),
+            Request::SetPassword { secret, value } => {
+                let result = self
+                    .with_vault(|vault| vault.set_password(&secret, value))
+                    .map(|(secret, backup)| RenameReply { ok: true, secret, backup });
+                self.finish(stream, peer, "set-password", Some(&secret.label()), result)
             }
             Request::Proxy { secret, host, port, method, path, headers, body, body_base64 } => {
                 match self.snapshot() {

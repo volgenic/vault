@@ -2,9 +2,11 @@
 //!
 //! The vault's daemon runs as the owner: a LaunchAgent in his login on macOS, a systemd user
 //! service started at boot on Linux. Every command here except the two installers is a request
-//! to the daemon over its socket (R13, R26). Any agent on the machine can run it, so no command
-//! prints a secret value: replies carry none (R4). Values are read at a hidden prompt or from standard input, never from
-//! arguments or the environment (R2).
+//! to the daemon over its socket (R13, R26). Any agent on the machine can run it. One command
+//! prints a secret value: `vault show NAME --password` (or `--copy`) shows a login's password or
+//! an API key's value, which the daemon audits with a reason before sending (#7666, the owner's
+//! exception to R4). No other reply carries one. Values are read at a hidden prompt or from
+//! standard input, never from arguments or the environment (R2).
 
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -98,7 +100,31 @@ enum Command {
     },
     /// Rename a secret. It keeps its id, rule and value; its version goes up by one.
     Rename { name: String, new_name: String },
-    /// List secrets: ids, names, kinds, sites and versions only.
+    /// Show a login (name, kind, site, username) or an API key. With --password it prints the
+    /// password or key too; with --copy it puts it on the clipboard. Every read is audited with
+    /// its reason, before the value leaves the vault.
+    Show {
+        name: String,
+        /// Also print the password (or the API key's value).
+        #[arg(long)]
+        password: bool,
+        /// Put the password (or key) on the clipboard instead of printing it.
+        #[arg(long)]
+        copy: bool,
+        /// Why you need it, for the audit log.
+        #[arg(long, default_value = "shown at the terminal")]
+        reason: String,
+    },
+    /// Replace a login's password, keeping its id, username and site. The new password is read
+    /// at a hidden prompt (or from standard input, with --yes). Earlier backups keep the old one.
+    SetPassword {
+        name: String,
+        /// Don't ask for confirmation (needed when the password comes from standard input).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List secrets: ids, names, kinds, sites and versions, and each login's username; never a
+    /// value.
     List,
     /// Whether each Claude plan's token works, has expired or was refused, by name only.
     Health,
@@ -234,6 +260,8 @@ fn main() -> ExitCode {
         }
         Command::Delete { name, yes } => delete(&paths, &name, yes),
         Command::Rename { name, new_name } => rename(&paths, &name, &new_name),
+        Command::Show { name, password, copy, reason } => show(&paths, &name, password, copy, &reason),
+        Command::SetPassword { name, yes } => set_password(&paths, &name, yes),
         Command::Wallet { action: WalletCommand::Create { name, chain, per_payment, daily, fees } } => {
             wallet_create(&paths, &name, &chain, &per_payment, &daily, &fees)
         }
@@ -640,6 +668,74 @@ fn rename(paths: &Paths, name: &str, new_name: &str) -> Result<(), VaultError> {
     Ok(())
 }
 
+/// `vault show` (#7666). With --password or --copy it asks the daemon's `reveal`, which audits the
+/// read with its reason before sending the value, as for an agent. Without either it only lists
+/// the login: the value isn't fetched at all.
+fn show(paths: &Paths, name: &str, password: bool, copy: bool, reason: &str) -> Result<(), VaultError> {
+    let what = |kind: Kind| if kind == Kind::Login { "password" } else { "value" };
+    if !password && !copy {
+        let listed = client::list(paths)?;
+        let secret = listed.secrets.iter().find(|secret| secret.name == name).ok_or_else(|| VaultError::UnknownSecret(name.into()))?;
+        if !vault::reveal::may_reveal(secret.kind) {
+            return Err(VaultError::WrongKind);
+        }
+        println!("name:      {}", secret.name);
+        println!("kind:      {}", secret.kind.label());
+        println!("site:      {}", secret.site);
+        if let Some(username) = &secret.username {
+            println!("username:  {username}");
+        }
+        println!("(--password prints the {0}, --copy copies it; either is audited)", what(secret.kind));
+        return Ok(());
+    }
+    let revealed = client::reveal(paths, &SecretRef::Name(name.into()), reason)?;
+    println!("name:      {}", revealed.name);
+    println!("kind:      {}", revealed.kind.label());
+    println!("site:      {}", revealed.site);
+    if let Some(username) = &revealed.username {
+        println!("username:  {username}");
+    }
+    if password {
+        print!("{:<11}", format!("{}:", what(revealed.kind)));
+        revealed.print_value(&mut std::io::stdout().lock())?;
+    }
+    if copy {
+        let program = revealed.copy_to_clipboard()?;
+        println!("{} copied to the clipboard ({program})", what(revealed.kind));
+    }
+    Ok(())
+}
+
+/// `vault set-password` (#7666): a login's new password, at a hidden prompt or from standard
+/// input with --yes.
+fn set_password(paths: &Paths, name: &str, yes: bool) -> Result<(), VaultError> {
+    let listed = client::list(paths)?;
+    let login = listed.secrets.iter().find(|secret| secret.name == name).ok_or_else(|| VaultError::UnknownSecret(name.into()))?;
+    if login.kind != Kind::Login {
+        return Err(VaultError::WrongKind);
+    }
+    println!(
+        "Replacing the password of login {name:?} for {} (username {})",
+        login.site,
+        login.username.as_deref().unwrap_or("?")
+    );
+    let stdin_value = !std::io::stdin().is_terminal();
+    if stdin_value && !yes {
+        return Err(VaultError::InvalidSecret("reading the password from standard input needs --yes".into()));
+    }
+    if !yes && !confirm("Replace it? Earlier backups keep the old one.")? {
+        println!("Nothing changed.");
+        return Ok(());
+    }
+    let value = read_hidden("New password (hidden): ")?;
+    // R27: sent only to a daemon verified as your own user's.
+    let reply = client::set_password(paths, &SecretRef::Name(name.into()), &value)?;
+    drop(value);
+    println!("Password of {:?} replaced: id {} kept, now version {}.", reply.secret.name, reply.secret.id, reply.secret.version);
+    print_backup(&reply.backup);
+    Ok(())
+}
+
 fn list(paths: &Paths) -> Result<(), VaultError> {
     let reply = client::list(paths)?;
     if reply.secrets.is_empty() {
@@ -650,6 +746,10 @@ fn list(paths: &Paths) -> Result<(), VaultError> {
     for secret in reply.secrets {
         // Personal details: which fields are filled, never what they say.
         let mut fields = secret.fields.as_ref().map(|fields| format!("  (filled: {})", fields.join(", "))).unwrap_or_default();
+        // Logins: the username; never the password.
+        if let Some(username) = &secret.username {
+            fields = format!("  (username {username})");
+        }
         // App secrets: the application, and whether builds may lease it; never the value.
         if let Some(app) = &secret.app {
             let lease = if secret.leasable == Some(true) { "leasable" } else { "not leasable" };
@@ -856,6 +956,12 @@ fn show_audit(paths: &Paths, all: bool) -> Result<(), VaultError> {
         text.push_str(&format!("  {}", e.outcome));
         if let Some(detail) = &e.detail {
             text.push_str(&format!("  ({detail})"));
+        }
+        if let Some(reason) = &e.reason {
+            text.push_str(&format!("  reason {reason:?}"));
+        }
+        if let Some(caller) = &e.caller {
+            text.push_str(&format!("  by {caller}"));
         }
         if let Some(program) = &e.peer_program {
             text.push_str(&format!("  [caller pid {} {}]", e.peer_pid.unwrap_or(0), program));

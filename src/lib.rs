@@ -30,6 +30,7 @@ pub mod model;
 pub mod platform;
 pub mod protocol;
 pub mod proxy;
+pub mod reveal;
 pub mod report;
 pub mod rules;
 pub mod scrub;

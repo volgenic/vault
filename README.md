@@ -9,8 +9,10 @@ an API call and gets the API's reply; the vault adds the key on the way out. An 
 2FA code and gets the six digits, never the seed. The host's model proxy sends a model call
 naming a Claude plan, and the vault adds the plan's token and streams the reply back as it
 arrives. Nothing the vault returns, to an agent or on the command line, can carry a secret value,
-with one exception: a build's `lease`, an app secret's value sealed to that build's own key for at
-most a day ("App secrets and leases" below). A wallet's key is made inside the vault and never
+with two exceptions: a build's `lease`, an app secret's value sealed to that build's own key for at
+most a day ("App secrets and leases" below); and `reveal` (`vault show --password`), a website
+login's password or an API key's value, given back for a stated reason and audited before it
+leaves ("Reading a saved password" below). A wallet's key is made inside the vault and never
 leaves it at all; agents' payments get the vault's signature, within caps only you set
 ("Wallets" below).
 
@@ -90,10 +92,10 @@ From a release, with no Rust toolchain (the Linux builds are static; see
 [docs/releasing.md](docs/releasing.md) for every target and how releases are made):
 
 ```sh
-curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.4.0/vault-0.4.0-x86_64-unknown-linux-musl.tar.gz
-curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.4.0/SHA256SUMS
+curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.5.0/vault-0.5.0-x86_64-unknown-linux-musl.tar.gz
+curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.5.0/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
-tar xzf vault-0.4.0-x86_64-unknown-linux-musl.tar.gz && vault-0.4.0-x86_64-unknown-linux-musl/vault install
+tar xzf vault-0.5.0-x86_64-unknown-linux-musl.tar.gz && vault-0.5.0-x86_64-unknown-linux-musl/vault install
 ```
 
 Or from source:
@@ -134,13 +136,15 @@ Or restore a backup: `vault install --for-restore`, then `vault restore FILE`.
 
 ## Commands
 
-The `vault` tool can't print a secret, so it is safe for any agent on the machine to run.
+The `vault` tool prints a secret only through `vault show --password` (or copies it with
+`--copy`): a login's password or an API key's value, audited with its reason before the daemon
+sends it ("Reading a saved password" below). No other command prints one.
 
 | Command | What it does |
 |---|---|
 | `vault install [--for-restore] [--json]` | Installs or updates the vault for your user. `--json`: one JSON object instead of prose, for a program ([docs/json.md](docs/json.md)). |
 | `vault add NAME --kind api-key --host HOST --method GET --path /v1 --header "Authorization: Bearer {key}"` | Adds an API key with its rule. The value is read at a hidden prompt, or from standard input with `--yes`. |
-| `vault add NAME --kind login --site SITE --username USER` | Adds a login. Stored and listed only, for now. |
+| `vault add NAME --kind login --site SITE --username USER` | Adds a login. `list` shows its username; `show --password` its password. |
 | `vault add NAME --kind 2fa --site SITE` | Adds a 2FA seed: base32, or an `otpauth://` link. |
 | `vault add NAME --kind claude_plan` | Adds a Claude plan's token (from `claude setup-token`). Used only by `stream`, only to `api.anthropic.com`. The host's daemon normally stores plans itself (`import_plan`, `add_sealed`). |
 | `vault add NAME --kind codex_login --yes < auth.json` | Adds a Codex login (its `auth.json`, whole), which the vault alone renews from then on. Used only by `stream`, only to `chatgpt.com`. `grok_login` likewise for Grok Build, to `cli-chat-proxy.grok.com`. The host's daemon normally hands logins over itself (`import_login` and `claim_refresh`, or `add_sealed`). |
@@ -150,7 +154,9 @@ The `vault` tool can't print a secret, so it is safe for any agent on the machin
 | `vault wallet caps NAME [--per-payment USD] [--daily USD] [fee caps]` | Changes a wallet's caps (the ones you leave out stay). Asks for the recovery key. |
 | `vault delete NAME` | Deletes a secret. Earlier backups keep it. A wallet isn't deleted: its key is the only way to its funds. |
 | `vault rename NAME NEW` | Renames a secret; its id, rule and value stay, its version goes up. |
-| `vault list` | Ids, names, kinds, versions and sites; for personal details, which fields are filled; for app secrets, the application and whether builds may lease it; for wallets, the address, the caps and what the last 24 hours spent. |
+| `vault show NAME [--password] [--copy] [--reason TEXT]` | A login's (or API key's) name, kind, site and username. `--password` also prints the password (or key), `--copy` puts it on the clipboard (`pbcopy`; on Linux `wl-copy`, `xclip` or `xsel`). Either asks the daemon's `reveal`, audited with the reason (default "shown at the terminal") and the caller `cli`. Without them, the value isn't fetched. |
+| `vault set-password NAME [--yes]` | Replaces a login's password, read at a hidden prompt (or from standard input with `--yes`); its id, username and site stay, its version goes up. Earlier backups keep the old one. |
+| `vault list` | Ids, names, kinds, versions and sites; for logins, the username (never the password); for personal details, which fields are filled; for app secrets, the application and whether builds may lease it; for wallets, the address, the caps and what the last 24 hours spent. |
 | `vault health` | For each Claude plan, Codex login and Grok login, by name: whether it works, has expired or was refused (sign in again), and who renews it. |
 | `vault status [--json]` | The program, the daemon, backups and the audit chain. `--json`: one JSON object for a program, with a `problems` list and the command for each ([docs/json.md](docs/json.md)); no secret names. |
 | `vault --version` | The version, the commit it was built from and the target. |
@@ -171,6 +177,7 @@ S="$HOME/Library/Application Support/Volgenic/socket/vault.sock"   # Linux: S=/r
 echo '{"op":"list","protocol":2,"request_id":"r1"}' | nc -U "$S"
 echo '{"op":"totp","name":"github-2fa"}' | nc -U "$S"
 echo '{"op":"totp","id":"c92f14b1c738a77ebeb59e609414c927"}' | nc -U "$S"
+echo '{"op":"reveal","name":"sales-gmail","reason":"sign in for item #123","caller":"agent @x"}' | nc -U "$S"
 echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U "$S"
 ```
 
@@ -178,11 +185,19 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   printable ASCII characters, or a whole number). Every reply, errors included, carries
   `"protocol": 2` and echoes the `request_id` as sent. A request without `protocol` is protocol 1
   and is served the same way. A newer protocol is refused with `unsupported_protocol`.
-- **Naming a secret:** `totp`, `proxy`, `delete` and `rename` take `"name"` or `"id"`, one of them.
-- `list` returns `{"ok":true,"secrets":[{"id","name","kind","site","version"}]}`; a
-  `personal_details` secret also has `"fields":["name","address",...]`, the filled ones, and an
+- **Naming a secret:** `totp`, `reveal`, `proxy`, `delete`, `rename` and `set_password` take
+  `"name"` or `"id"`, one of them.
+- `list` returns `{"ok":true,"secrets":[{"id","name","kind","site","version"}]}`; a `login` also
+  has `"username"` (never its password), a `personal_details` secret `"fields":["name","address",...]`, the filled ones, and an
   `app_secret` has `"app"` and `"leasable"`.
 - `totp` returns `{"ok":true,"id":"...","name":"github-2fa","code":"123456","seconds_left":17}`.
+- **`reveal`** gives back a `login`'s password or an `api-key`'s value, for a reason (see "Reading
+  a saved password" below): `{"op":"reveal","name":"sales-gmail","reason":"...","caller":"agent @x"}`
+  returns `{"ok":true,"id","name","kind","site","version","username","value"}` (`username` is null
+  for an API key; a value that isn't UTF-8 text comes as `value_base64` instead of `value`).
+- **`set_password`** replaces a login's password: `{"op":"set_password","name":"sales-gmail","value":"..."}`
+  returns `{"ok":true,"secret":{...},"backup":{...}}`, the id, username and site kept, the version
+  up by one. `vault set-password` sends it.
 - `proxy` takes `method`, `path` (with query), optional `headers` (an object) and `body` or
   `body_base64`. It returns `{"ok":true,"status":200,"headers":[[name,value]],"body":"..."}`.
   The key goes only into the header its rule names, only to the rule's host, method and path.
@@ -268,6 +283,28 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   command-line tool and the mirror send; `src/protocol.rs` lists them.
 - Errors are `{"ok":false,"error":"rule_mismatch","message":"..."}`; `not_leasable` adds
   `"names"`. `sign` over a cap answers `over_cap`.
+
+## Reading a saved password
+
+The owner's call, 2026-11-17 (work item #7666): he and his agents may read a saved password,
+instead of resetting it when one is needed. It is the one place a value leaves the vault in plain
+text, and everything else in the threat model holds:
+
+- **Two kinds only.** `reveal` gives back a `login`'s password or an `api-key`'s value. A 2FA seed,
+  a Claude plan token, a Codex or Grok login, personal details, an app secret and a wallet key are
+  never revealed (`wrong_kind`).
+- **A reason, every time.** A request without one, or with an empty one, is refused
+  (`bad_request`). The reason is at most 500 characters on one line; `caller` (an agent's handle,
+  or `cli`) is optional, at most 128, and like the peer's program a hint, never a permission.
+- **Audited first.** The `reveal` line, with the reason, the caller, the peer's pid and program and
+  the request id, is on disk before the value is sent; when it can't be written nothing is sent
+  (`audit_unavailable`, R28). Refusals are audited too. `vault audit` shows them:
+  `reveal  sales-gmail  ok  (login accounts.google.com)  reason "sign in for item #123"  by agent @x`.
+- **Nowhere else.** The value is in the reply line only, which the daemon writes into a buffer it
+  wipes after sending: never in the audit log, an error or the daemon's log, and nothing caches it.
+- **Who can ask.** Like every request, any process running as you (R22). Agents reach it through
+  the host daemon's relay and Volgenic's `accounts:use` tool, which ask for the reason; Volgenic's
+  Settings show a login's password after a click.
 
 ## Handing over a Codex or Grok login
 
