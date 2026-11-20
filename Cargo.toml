@@ -1,6 +1,6 @@
 [package]
 name = "vault"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0"
@@ -63,7 +63,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 [features]
 # For local evidence only, never in a release (scripts/release.sh doesn't enable it): with it, the
 # daemon sends the kinds' upstream hosts and token servers (api.anthropic.com, chatgpt.com, auth.openai.com,
-# cli-chat-proxy.grok.com, auth.x.ai) to 127.0.0.1 at VAULT_TEST_UPSTREAM_PORT
+# cli-chat-proxy.grok.com, auth.x.ai, the Google AI login's Cloud Code hosts and oauth2.googleapis.com)
+# to 127.0.0.1 at VAULT_TEST_UPSTREAM_PORT
 # and also trusts the CA in VAULT_TEST_CA, so a streamed reply can be shown from a local test
 # server with the real TLS path. The daemon logs a warning at start when it is on.
 test-upstream = []

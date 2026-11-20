@@ -400,16 +400,23 @@ fn add(
         println!("  username: {username}");
     }
     if let Some(spec) = vault::kinds::spec(kind) {
+        // A prefix ending in `:` covers one method name (`rules::path_within`).
+        let paths: Vec<String> = spec
+            .path_prefixes
+            .iter()
+            .map(|prefix| if prefix.ends_with(':') { format!("{prefix}<method>") } else { format!("{prefix} (and below)") })
+            .collect();
         println!(
-            "  used only by `stream`: {} https://{}{} (and below), the token in `{}`",
+            "  used only by `stream`: {} to https://{}, at {}, the token in `{}`",
             spec.methods.join(","),
-            spec.hosts.join(", "),
-            spec.path_prefixes.join(", "),
+            spec.hosts.join(" or https://"),
+            paths.join(" or "),
             spec.set_headers.iter().map(|h| h.name).collect::<Vec<_>>().join(", ")
         );
         if let Some(refresher) = spec.refresher {
             println!("  renewed by the vault alone, at {}: nothing else may renew this login from now on", refresher.host);
-            println!("  (the auth.json you give stops being renewable once the vault renews it)");
+            let given = if kind == Kind::GoogleAiLogin { "agy token file" } else { "auth.json" };
+            println!("  (the {given} you give stops being renewable once the vault renews it)");
         }
     }
     if kind == Kind::AppSecret {

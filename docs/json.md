@@ -72,7 +72,7 @@ A list of `{code, severity, sentence, how}`, errors first:
     "running": true,                   // answered on its socket, as your own user (R22)
     "pid": 21052,
     "version": "0.2.0",                // the daemon's build
-    "format": 8,                       // the vault-file format it writes
+    "format": 9,                       // the vault-file format it writes
     "socket": "/home/node/.local/share/volgenic/socket/vault.sock",
     "service_file": "/home/node/.config/systemd/user/volgenic-vault.service",
     "service_file_present": true,
@@ -84,7 +84,7 @@ A list of `{code, severity, sentence, how}`, errors first:
     "identity": "1a04647e8803342eefe9d28e5598e3b7",   // stable through restores
     "vault_id": "59b9e611b6368d65e000249e1077c993",   // this copy
     "recovery_fingerprint": "1a04-647e-8803",
-    "format": 8,
+    "format": 9,
     "created_at": "2026-11-16T05:00:19Z",
     "generation": 2,
     "secrets": 1,                      // a count, never names
