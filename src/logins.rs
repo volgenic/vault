@@ -1,5 +1,7 @@
-//! Codex and Grok logins (work item #7380): the tokens of a ChatGPT sign-in (Codex) and of a
-//! grok.com sign-in (Grok Build), which the vault holds and is the only one to renew. Pure
+//! Codex and Grok logins (work item #7380), and Google AI logins (#8147): the tokens of a ChatGPT
+//! sign-in (Codex), of a grok.com sign-in (Grok Build) and of a Google sign-in made by
+//! Antigravity's `agy` (a Google AI Pro or Ultra plan), which the vault holds and is the only one
+//! to renew. Pure
 //! functions over plain values, no I/O: reading what the host's `auth.json` holds, the form the
 //! vault stores, the renewal request to the provider's token server, and what its reply means.
 //!
@@ -13,6 +15,10 @@
 //! Grok, ~/.grok/auth.json, one entry per sign-in scope:
 //! {"https://auth.x.ai::<client id>":{"key":"<access token>","refresh_token":"<token>",
 //!  "expires_at":"2026-11-15T12:00:00Z","auth_mode":"oidc","user_id":"..."}}
+//!
+//! Google AI, agy's <gemini dir>/antigravity-cli/antigravity-oauth-token (Go's oauth2.Token):
+//! {"token":{"access_token":"ya29...","token_type":"Bearer","refresh_token":"1//...",
+//!  "expiry":"2026-11-20T22:06:00.123456789Z","expires_in":3599},"auth_method":"consumer"}
 //! ```
 //!
 //! Every other field is skipped without being kept (an `OPENAI_API_KEY` included). **What the
@@ -36,6 +42,13 @@
 //! (`invalid_grant`, `refresh_token_expired`, `refresh_token_reused`,
 //! `refresh_token_invalidated`), means the login is gone: the person signs in again. Anything
 //! else (a firewall's 403, an `invalid_request`, a 429, a 5xx) is tried again later.
+//!
+//! A Google AI login renews at `oauth2.googleapis.com/token` with a form body and agy's own
+//! installed-app client (`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`). Google usually keeps the
+//! refresh token; when a reply carries a new one, it replaces the old. Only `invalid_grant` (the
+//! refresh token expired or was revoked) means "sign in again". Google answers a client it doesn't
+//! know with 401 `invalid_client`, which says nothing about the refresh token, so for Google a
+//! 401 alone is tried again later.
 
 use std::fmt;
 
@@ -63,6 +76,19 @@ const CODEX_NO_EXPIRY_SECS: u64 = 8 * 86_400;
 pub const GROK_ISSUER: &str = "https://auth.x.ai";
 pub const GROK_REFRESH_HOST: &str = "auth.x.ai";
 pub const GROK_REFRESH_PATH: &str = "/oauth2/token";
+
+/// Antigravity's own OAuth client, compiled into the agy binary (1.5.13, the build volgenic/host
+/// pins): the one its sign-in link names (`agy acp --login` prints it), so the one its tokens
+/// were issued to. An installed-app client's secret isn't a secret (Google's own words for
+/// installed apps); it is needed to renew all the same. Of the three secrets in the binary, this
+/// is the one Google pairs with this id: a refresh with a made-up token answered `invalid_grant`,
+/// the other two `invalid_client` (2026-11-20, no sign-in).
+pub const GOOGLE_CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+pub const GOOGLE_CLIENT_SECRET: &str = "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";
+pub const GOOGLE_REFRESH_HOST: &str = "oauth2.googleapis.com";
+pub const GOOGLE_REFRESH_PATH: &str = "/token";
+/// agy's sign-in kind for a personal Google account (a Google AI Pro or Ultra plan).
+const GOOGLE_CONSUMER: &str = "consumer";
 
 /// The largest token reply the vault reads.
 pub const MAX_REFRESH_REPLY: usize = 64 * 1024;
@@ -152,8 +178,9 @@ fn rfc3339_to_unix(text: &str) -> Option<u64> {
     u64::try_from(at.unix_timestamp()).ok()
 }
 
-/// `expires_at` as Grok may write it: an RFC 3339 time, or a Unix time in seconds or milliseconds.
-fn grok_expiry(value: &serde_json::Value) -> Option<u64> {
+/// An expiry as Grok or agy may write it: an RFC 3339 time, or a Unix time in seconds or
+/// milliseconds. Go's zero time (`0001-01-01T00:00:00Z`, "no expiry") is none.
+fn expiry_value(value: &serde_json::Value) -> Option<u64> {
     let from_number = |n: f64| if n > 1e12 { (n / 1000.0) as u64 } else { n as u64 };
     match value {
         serde_json::Value::Number(n) => n.as_f64().filter(|n| *n > 0.0).map(from_number),
@@ -293,7 +320,7 @@ fn grok_from_auth_json(text: &SecretValue) -> Result<Login, VaultError> {
     if let Some(id) = &user_id {
         check_label(id, "user id")?;
     }
-    let expires_at = entry.expires_at.as_ref().and_then(grok_expiry).or_else(|| jwt_exp(&access_token));
+    let expires_at = entry.expires_at.as_ref().and_then(expiry_value).or_else(|| jwt_exp(&access_token));
     Ok(Login {
         access_token,
         refresh_token,
@@ -305,12 +332,65 @@ fn grok_from_auth_json(text: &SecretValue) -> Result<Login, VaultError> {
     })
 }
 
+#[derive(Deserialize)]
+struct AgyTokenFileWire {
+    #[serde(default)]
+    token: Option<AgyTokenWire>,
+    #[serde(default)]
+    auth_method: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AgyTokenWire {
+    #[serde(default, deserialize_with = "secret_bytes::deserialize_opt")]
+    access_token: Option<SecretValue>,
+    #[serde(default, deserialize_with = "secret_bytes::deserialize_opt")]
+    refresh_token: Option<SecretValue>,
+    #[serde(default)]
+    expiry: Option<serde_json::Value>,
+}
+
+/// Reads agy's token file (a Google sign-in for a Google AI Pro or Ultra plan). Only a consumer
+/// sign-in with a refresh token: never an API key (`AIza...`), a business or Cloud sign-in, or a
+/// container's placeholder (no refresh token).
+fn google_from_token_file(text: &SecretValue) -> Result<Login, VaultError> {
+    let wire: AgyTokenFileWire = serde_json::from_slice(text.expose())
+        .map_err(|_| invalid("this isn't agy's token file (a JSON object with a token)"))?;
+    match wire.auth_method.as_deref() {
+        Some(method) if method == GOOGLE_CONSUMER => {}
+        Some(_) => return Err(invalid("this agy sign-in isn't a personal Google account (auth_method isn't consumer)")),
+        None => return Err(invalid("this agy token file names no auth_method (a personal sign-in says consumer)")),
+    }
+    let token = wire.token.ok_or_else(|| invalid("this agy token file has no token"))?;
+    let access_token = token.access_token.ok_or_else(|| invalid("this agy sign-in has no access token"))?;
+    let refresh_token = token
+        .refresh_token
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| invalid("this agy sign-in has no refresh token (a container's placeholder can't be imported)"))?;
+    check_token(&access_token, "access token")?;
+    check_token(&refresh_token, "refresh token")?;
+    if access_token.expose().starts_with(b"AIza") || refresh_token.expose().starts_with(b"AIza") {
+        return Err(invalid("this is a Google API key, not a Google sign-in"));
+    }
+    let expires_at = token.expiry.as_ref().and_then(expiry_value);
+    Ok(Login {
+        access_token,
+        refresh_token,
+        id_token: None,
+        account_id: None,
+        client_id: None,
+        user_id: None,
+        expires_at,
+    })
+}
+
 /// Reads what the host gives for a login of `kind` (its `auth.json`, whole) into the form the
-/// vault stores, and when its access token expires.
+/// vault stores, and when its access token expires. For a Google AI login, agy's token file.
 pub(crate) fn intake(kind: Kind, text: &SecretValue) -> Result<(SecretValue, Option<u64>), VaultError> {
     let login = match kind {
         Kind::CodexLogin => codex_from_auth_json(text)?,
         Kind::GrokLogin => grok_from_auth_json(text)?,
+        Kind::GoogleAiLogin => google_from_token_file(text)?,
         _ => return Err(VaultError::WrongKind),
     };
     let expires_at = login.expires_at;
@@ -323,6 +403,10 @@ pub(crate) fn intake_codex(text: &SecretValue) -> Result<(SecretValue, Option<u6
 
 pub(crate) fn intake_grok(text: &SecretValue) -> Result<(SecretValue, Option<u64>), VaultError> {
     intake(Kind::GrokLogin, text)
+}
+
+pub(crate) fn intake_google_ai(text: &SecretValue) -> Result<(SecretValue, Option<u64>), VaultError> {
+    intake(Kind::GoogleAiLogin, text)
 }
 
 // ---- the stored form ----
@@ -376,6 +460,8 @@ impl Login {
         match kind {
             Kind::CodexLogin => check_label(self.account_id.as_deref().unwrap_or(""), "account id"),
             Kind::GrokLogin => check_label(self.client_id.as_deref().unwrap_or(""), "client id"),
+            // The client is agy's, fixed in this build (`GOOGLE_CLIENT_ID`); nothing else to check.
+            Kind::GoogleAiLogin => Ok(()),
             _ => Err(VaultError::WrongKind),
         }
     }
@@ -424,6 +510,10 @@ pub(crate) fn validate_grok(stored: &SecretValue) -> Result<(), VaultError> {
     Login::read(Kind::GrokLogin, stored).map(|_| ())
 }
 
+pub(crate) fn validate_google_ai(stored: &SecretValue) -> Result<(), VaultError> {
+    Login::read(Kind::GoogleAiLogin, stored).map(|_| ())
+}
+
 // ---- renewal ----
 
 /// The renewal request for a stored Codex login.
@@ -457,6 +547,30 @@ pub(crate) fn grok_refresh_call(stored: &SecretValue) -> Result<RefreshCall, Vau
     })
 }
 
+/// The renewal request for a stored Google AI login: a standard OAuth refresh, form-encoded, with
+/// agy's installed-app client.
+pub(crate) fn google_ai_refresh_call(stored: &SecretValue) -> Result<RefreshCall, VaultError> {
+    let login = Login::read(Kind::GoogleAiLogin, stored)?;
+    let mut body = Zeroizing::new(Vec::with_capacity(login.refresh_token.len() * 3 + 512));
+    body.extend_from_slice(b"grant_type=refresh_token");
+    for (field, value) in [("client_id", GOOGLE_CLIENT_ID.as_bytes()), ("client_secret", GOOGLE_CLIENT_SECRET.as_bytes())] {
+        body.extend_from_slice(format!("&{field}=").as_bytes());
+        for piece in url::form_urlencoded::byte_serialize(value) {
+            body.extend_from_slice(piece.as_bytes());
+        }
+    }
+    body.extend_from_slice(b"&refresh_token=");
+    for piece in url::form_urlencoded::byte_serialize(login.refresh_token.expose()) {
+        body.extend_from_slice(piece.as_bytes());
+    }
+    Ok(RefreshCall {
+        host: GOOGLE_REFRESH_HOST,
+        path: GOOGLE_REFRESH_PATH,
+        content_type: "application/x-www-form-urlencoded",
+        body,
+    })
+}
+
 #[derive(Deserialize)]
 struct TokenReplyWire {
     #[serde(deserialize_with = "secret_bytes::deserialize")]
@@ -474,6 +588,7 @@ struct TokenReplyWire {
 fn renewed(kind: Kind, stored: &SecretValue, status: u16, body: &[u8], now: u64) -> Result<(SecretValue, Option<u64>), VaultError> {
     match status {
         200..=299 => {}
+        _ if kind == Kind::GoogleAiLogin => return Err(google_refusal(status, body)),
         _ => return Err(refusal(status, body)),
     }
     let old = Login::read(kind, stored)?;
@@ -488,7 +603,10 @@ fn renewed(kind: Kind, stored: &SecretValue, status: u16, body: &[u8], now: u64)
         // The provider kept the refresh token as it was.
         None => copy_secret(&old.refresh_token),
     };
-    let id_token = match (reply.id_token.filter(|token| !token.is_empty()), &old.id_token) {
+    // A Google AI login keeps no id token: nothing reads one, so a reply's (Google sends one for
+    // the openid scope) is dropped.
+    let reply_id_token = reply.id_token.filter(|token| !token.is_empty() && kind != Kind::GoogleAiLogin);
+    let id_token = match (reply_id_token, &old.id_token) {
         (Some(token), _) if check_token(&token, "renewed id token").is_ok() => Some(token),
         (_, Some(old)) => Some(copy_secret(old)),
         (_, None) => None,
@@ -555,12 +673,31 @@ fn refusal(status: u16, body: &[u8]) -> VaultError {
     })
 }
 
+/// What Google's token server's non-2xx reply means. Only `invalid_grant` (the refresh token
+/// expired, was revoked, or the account's password changed) is `CredentialRefused`. A 401
+/// `invalid_client` says the client isn't known (agy's changed), not that the refresh token is
+/// dead, so it is tried again later like a 429 or a 5xx.
+fn google_refusal(status: u16, body: &[u8]) -> VaultError {
+    let code = oauth_error_code(body);
+    if code.as_deref() == Some("invalid_grant") {
+        return VaultError::CredentialRefused;
+    }
+    VaultError::UpstreamFailed(match code {
+        Some(code) => format!("Google's token server answered {status} ({code})"),
+        None => format!("Google's token server answered {status}"),
+    })
+}
+
 pub(crate) fn codex_renewed(stored: &SecretValue, status: u16, body: &[u8], now: u64) -> Result<(SecretValue, Option<u64>), VaultError> {
     renewed(Kind::CodexLogin, stored, status, body, now)
 }
 
 pub(crate) fn grok_renewed(stored: &SecretValue, status: u16, body: &[u8], now: u64) -> Result<(SecretValue, Option<u64>), VaultError> {
     renewed(Kind::GrokLogin, stored, status, body, now)
+}
+
+pub(crate) fn google_ai_renewed(stored: &SecretValue, status: u16, body: &[u8], now: u64) -> Result<(SecretValue, Option<u64>), VaultError> {
+    renewed(Kind::GoogleAiLogin, stored, status, body, now)
 }
 
 /// The access token and the account id a stored login sends upstream.

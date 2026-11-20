@@ -38,6 +38,10 @@ pub enum Kind {
     /// the vault.
     #[serde(rename = "grok_login")]
     GrokLogin,
+    /// A Google AI Pro or Ultra login (a Google sign-in made by Antigravity's `agy`), as
+    /// `kinds::GOOGLE_AI_LOGIN` allows, renewed only by the vault (#8147).
+    #[serde(rename = "google_ai_login")]
+    GoogleAiLogin,
     /// A person's real details (name, address, birthday, phone), filled per field (`details`,
     /// #7435). Stored and listed only, for now: no request gives a value back.
     #[serde(rename = "personal_details")]
@@ -64,6 +68,7 @@ impl Kind {
             Kind::ClaudePlan => "claude_plan",
             Kind::CodexLogin => "codex_login",
             Kind::GrokLogin => "grok_login",
+            Kind::GoogleAiLogin => "google_ai_login",
             Kind::PersonalDetails => "personal_details",
             Kind::AppSecret => "app_secret",
             Kind::Wallet => "wallet",
@@ -71,13 +76,14 @@ impl Kind {
     }
 
     /// Every kind, in the order listings count them.
-    pub const ALL: [Kind; 9] = [
+    pub const ALL: [Kind; 10] = [
         Kind::ApiKey,
         Kind::Login,
         Kind::TwoFactor,
         Kind::ClaudePlan,
         Kind::CodexLogin,
         Kind::GrokLogin,
+        Kind::GoogleAiLogin,
         Kind::PersonalDetails,
         Kind::AppSecret,
         Kind::Wallet,
@@ -300,10 +306,11 @@ pub(crate) struct VaultDoc {
 /// - **7**: the `wallet` kind and a record's `wallet` (#7440).
 /// - **8**: Solana and Tron wallets, with their own fee caps, and a spend's `fee` (was `fee_wei`)
 ///   and `identity` (#7490).
-pub(crate) const VAULT_FORMAT: u32 = 8;
+/// - **9**: the `google_ai_login` kind (#8147).
+pub(crate) const VAULT_FORMAT: u32 = 9;
 
 /// Every format this build reads. Older ones are migrated to `VAULT_FORMAT` when read.
-pub(crate) const READABLE_FORMATS: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+pub(crate) const READABLE_FORMATS: [u32; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 /// A secret as a request names it: by its name, or by its stable id.
 #[derive(Clone, Debug, PartialEq, Eq)]

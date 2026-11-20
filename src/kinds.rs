@@ -7,7 +7,8 @@
 //! itself (`refresher`). The caller names a secret and sends a request; it never chooses a host
 //! outside the list or a header value the vault sets. A new kind is one more entry here, a `Kind`
 //! variant and, when its tokens expire, a refresher. Codex and Grok logins (#7380) are the first
-//! kinds with a refresher and with more than one stored field (`logins`).
+//! kinds with a refresher and with more than one stored field (`logins`); a Google AI login
+//! (#8147) is the third.
 
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +77,10 @@ pub struct Refresher {
     pub host: &'static str,
     /// The vault renews a credential this long before it expires.
     pub ahead_secs: u64,
+    /// After a renewal that worked, an early one (the login due but not yet expired) waits this
+    /// long, so a provider whose tokens last less than `ahead_secs` isn't renewed every minute.
+    /// Shorter than the token's life minus `ahead_secs`, or the early renewal never happens.
+    pub early_gap_secs: u64,
     /// The renewal request for the stored value.
     pub call: fn(stored: &SecretValue) -> Result<crate::logins::RefreshCall, VaultError>,
     /// What the token server's reply means: the renewed value and its expiry;
@@ -111,6 +116,10 @@ pub struct KindSpec {
     pub refused_headers: &'static [&'static str],
     /// What a reply says about the credential: its status, and the first bytes of its body.
     pub classify: fn(status: u16, body: &[u8]) -> Option<HealthState>,
+    /// Why a reply refused the credential, when the kind can say more than its status: a fixed
+    /// sentence for the person (`health`), never text from the body, which could quote what was
+    /// sent.
+    pub reason: fn(status: u16, body: &[u8]) -> Option<&'static str>,
     /// Checks a value before it is stored.
     pub validate: fn(value: &SecretValue) -> Result<(), VaultError>,
     /// For a kind whose stored form isn't what a person or the host gives (a login's `auth.json`):
@@ -137,6 +146,7 @@ pub const CLAUDE_PLAN: KindSpec = KindSpec {
     set_headers: &[SetHeader { name: "authorization", prefix: "Bearer ", suffix: "", source: HeaderSource::Token }],
     refused_headers: &["x-api-key", "cookie"],
     classify: classify_anthropic,
+    reason: no_reason,
     validate: validate_token,
     intake: None,
     refresher: None,
@@ -160,12 +170,14 @@ pub const CODEX_LOGIN: KindSpec = KindSpec {
     ],
     refused_headers: &["x-api-key", "cookie", "openai-organization", "openai-project"],
     classify: classify_login,
+    reason: no_reason,
     validate: crate::logins::validate_codex,
     intake: Some(crate::logins::intake_codex),
     refresher: Some(Refresher {
         host: crate::logins::CODEX_REFRESH_HOST,
         // A Codex access token lasts about ten days; a day ahead leaves room for a day of failures.
         ahead_secs: 86_400,
+        early_gap_secs: 3600,
         call: crate::logins::codex_refresh_call,
         parse: crate::logins::codex_renewed,
     }),
@@ -185,19 +197,54 @@ pub const GROK_LOGIN: KindSpec = KindSpec {
     set_headers: &[SetHeader { name: "authorization", prefix: "Bearer ", suffix: "", source: HeaderSource::Token }],
     refused_headers: &["x-api-key", "cookie"],
     classify: classify_login,
+    reason: no_reason,
     validate: crate::logins::validate_grok,
     intake: Some(crate::logins::intake_grok),
     refresher: Some(Refresher {
         host: crate::logins::GROK_REFRESH_HOST,
         // Grok renews 5 minutes ahead itself, and the host's daemon renewed 30 minutes ahead.
         ahead_secs: 15 * 60,
+        early_gap_secs: 3600,
         call: crate::logins::grok_refresh_call,
         parse: crate::logins::grok_renewed,
     }),
 };
 
+/// A Google AI Pro or Ultra login: a Google sign-in made by Antigravity's `agy` (`agy acp --login`),
+/// as agy keeps it in `<gemini dir>/antigravity-cli/antigravity-oauth-token` (design page
+/// 723f1bb8, "vault"). agy sends every Cloud Code call to `daily-cloudcode-pa.googleapis.com` (or
+/// `cloudcode-pa`) as `POST /v1internal:<method>` with `Authorization: Bearer <access token>`.
+/// Another way of naming a credential or a billed project (an API key, a cookie, a quota
+/// project) is refused, so a call only ever uses the owner's plan. agy renews at
+/// `oauth2.googleapis.com/token` with its installed-app client, which only the vault's refresher
+/// calls; a caller can't. The host names these secrets `google_ai.pro` and `google_ai.ultra`.
+pub const GOOGLE_AI_LOGIN: KindSpec = KindSpec {
+    kind: Kind::GoogleAiLogin,
+    default_site: "antigravity.google",
+    hosts: &["daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"],
+    methods: &["POST", "GET"],
+    // Calls are `/v1internal:<method>` (`rules::path_within`'s colon form); `/v1internal` also
+    // covers anything under `/v1internal/`.
+    path_prefixes: &["/v1internal:", "/v1internal"],
+    set_headers: &[SetHeader { name: "authorization", prefix: "Bearer ", suffix: "", source: HeaderSource::Token }],
+    refused_headers: &["x-goog-api-key", "cookie", "x-goog-user-project"],
+    classify: classify_google,
+    reason: google_reason,
+    validate: crate::logins::validate_google_ai,
+    intake: Some(crate::logins::intake_google_ai),
+    refresher: Some(Refresher {
+        host: crate::logins::GOOGLE_REFRESH_HOST,
+        // An access token lasts about an hour; ten minutes ahead leaves room for a few failures.
+        ahead_secs: 10 * 60,
+        // Renewed about 50 minutes in, so the gap has to be shorter than that.
+        early_gap_secs: 30 * 60,
+        call: crate::logins::google_ai_refresh_call,
+        parse: crate::logins::google_ai_renewed,
+    }),
+};
+
 /// Every kind with an entry.
-pub const TABLE: &[&KindSpec] = &[&CLAUDE_PLAN, &CODEX_LOGIN, &GROK_LOGIN];
+pub const TABLE: &[&KindSpec] = &[&CLAUDE_PLAN, &CODEX_LOGIN, &GROK_LOGIN, &GOOGLE_AI_LOGIN];
 
 /// The entry for `kind`, if it has one.
 pub fn spec(kind: Kind) -> Option<&'static KindSpec> {
@@ -234,6 +281,41 @@ pub fn classify_login(status: u16, body: &[u8]) -> Option<HealthState> {
         401 => Some(HealthState::Refused),
         _ => None,
     }
+}
+
+/// Google's Cloud Code replies (`google.rpc.Status` errors: `{"error":{"code","message","status"}}`):
+/// a 2xx accepts the token; a 401 (`UNAUTHENTICATED`) refuses it, as expired when its body says
+/// so; a 403 `PERMISSION_DENIED` naming the Terms of Service refuses the login (`google_reason`
+/// says why). Any other 403 (a project or API not enabled), a 429 (`RESOURCE_EXHAUSTED`, the
+/// plan's quota) or a 5xx says nothing about the token.
+pub fn classify_google(status: u16, body: &[u8]) -> Option<HealthState> {
+    let says = |word: &str| memchr::memmem::find(&body.to_ascii_lowercase(), word.as_bytes()).is_some();
+    match status {
+        200..=299 => Some(HealthState::Works),
+        401 if says("expired") => Some(HealthState::Expired),
+        401 => Some(HealthState::Refused),
+        403 if google_terms_refusal(body) => Some(HealthState::Refused),
+        _ => None,
+    }
+}
+
+/// Whether a Google error body is a `PERMISSION_DENIED` that names the Terms of Service.
+fn google_terms_refusal(body: &[u8]) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let says = |word: &str| memchr::memmem::find(&lower, word.as_bytes()).is_some();
+    says("permission_denied") && (says("terms of service") || says("terms_of_service") || says("termsofservice"))
+}
+
+/// Why Google refused a Google AI login, for the person reading `vault health`.
+pub fn google_reason(status: u16, body: &[u8]) -> Option<&'static str> {
+    (status == 403 && google_terms_refusal(body)).then_some(
+        "Google refused this plan under its Terms of Service (403 PERMISSION_DENIED); check the Google account before signing in again",
+    )
+}
+
+/// A kind whose refusals say nothing more than their status.
+pub fn no_reason(_status: u16, _body: &[u8]) -> Option<&'static str> {
+    None
 }
 
 /// A bearer token: 1 to 4096 printable ASCII characters with no spaces, so it can only ever be

@@ -18,6 +18,9 @@ struct Entry {
     state: HealthState,
     at: String,
     status: Option<u16>,
+    /// Why, when the kind's reply said more than its status (`KindSpec::reason`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -40,14 +43,23 @@ impl HealthBook {
     /// A refusal from the token server (`Refused`) stays for its version until a reply says the
     /// token works: a later 401 at the same version (`Expired`) doesn't hide that the login is
     /// gone, nor let the vault try its dead refresh token again.
-    pub fn observe(&mut self, id: &str, version: u64, state: HealthState, status: Option<u16>, at: String) -> bool {
+    pub fn observe(
+        &mut self,
+        id: &str,
+        version: u64,
+        state: HealthState,
+        status: Option<u16>,
+        reason: Option<&str>,
+        at: String,
+    ) -> bool {
         let refused = self.entries.get(id).is_some_and(|old| old.version == version && old.state == HealthState::Refused);
         if refused && state != HealthState::Works {
             return false;
         }
-        let entry = Entry { version, state, at, status };
+        let reason = reason.map(str::to_string);
+        let entry = Entry { version, state, at, status, reason: reason.clone() };
         match self.entries.insert(id.to_string(), entry) {
-            Some(old) => old.version != version || old.state != state,
+            Some(old) => old.version != version || old.state != state || old.reason != reason,
             None => true,
         }
     }
@@ -82,6 +94,7 @@ impl HealthBook {
                     state: if past_expiry && state != HealthState::Refused { HealthState::Expired } else { state },
                     checked_at: known.map(|entry| entry.at.clone()),
                     status: known.and_then(|entry| entry.status),
+                    reason: known.and_then(|entry| entry.reason.clone()),
                     refresh: refresh.into(),
                     expires_at: record.expires_at,
                 }

@@ -197,10 +197,15 @@ fn check_path(path: &str) -> Result<(), VaultError> {
 }
 
 /// Whether `path` is under `prefix`, on whole segments: `/v1` covers `/v1` and `/v1/x`,
-/// never `/v1evil`.
+/// never `/v1evil`. A prefix ending in `:` names a resource's custom methods (Google's
+/// `/v1internal:loadCodeAssist`): it covers one more name in the same segment, never another
+/// segment (`/v1internal:x/y`) and never the bare prefix.
 pub fn path_within(prefix: &str, path: &str) -> bool {
     if prefix == "/" {
         return true;
+    }
+    if prefix.ends_with(':') {
+        return path.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('/') && !rest.contains(':'));
     }
     path == prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
 }

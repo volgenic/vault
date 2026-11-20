@@ -210,6 +210,10 @@ enum KindArg {
     /// A Grok Build login: its auth.json, read whole from standard input with --yes.
     #[value(name = "grok_login")]
     GrokLogin,
+    /// A Google AI Pro or Ultra login: agy's token file (antigravity-cli/antigravity-oauth-token),
+    /// read whole from standard input with --yes.
+    #[value(name = "google_ai_login")]
+    GoogleAiLogin,
     /// Your real name, address, birthday and phone: asked one field at a time, or v1's JSON
     /// object read from standard input with --yes.
     #[value(name = "personal_details")]
@@ -352,6 +356,7 @@ fn add(
         KindArg::ClaudePlan => Kind::ClaudePlan,
         KindArg::CodexLogin => Kind::CodexLogin,
         KindArg::GrokLogin => Kind::GrokLogin,
+        KindArg::GoogleAiLogin => Kind::GoogleAiLogin,
         KindArg::PersonalDetails => Kind::PersonalDetails,
         KindArg::AppSecret => Kind::AppSecret,
     };
@@ -475,6 +480,7 @@ fn prompt_for(kind: Kind) -> &'static str {
         Kind::ClaudePlan => "Claude plan token, from `claude setup-token` (hidden): ",
         Kind::CodexLogin => "Codex auth.json, whole (hidden; or pipe the file in with --yes): ",
         Kind::GrokLogin => "Grok auth.json, whole (hidden; or pipe the file in with --yes): ",
+        Kind::GoogleAiLogin => "agy's antigravity-oauth-token file, whole (hidden; or pipe the file in with --yes): ",
         Kind::PersonalDetails => "Personal details, a JSON object (hidden; or pipe it in with --yes): ",
         Kind::AppSecret => "App secret's value (hidden; or pipe it in with --yes): ",
         Kind::Wallet => "",
@@ -681,13 +687,13 @@ fn list(paths: &Paths) -> Result<(), VaultError> {
 fn health(paths: &Paths) -> Result<(), VaultError> {
     let reply = client::health(paths)?;
     if reply.credentials.is_empty() {
-        println!("No Claude plans, Codex logins or Grok logins in the vault.");
+        println!("No Claude plans, Codex, Grok or Google AI logins in the vault.");
         return Ok(());
     }
-    println!("{:<24} {:<12} {:>3}  {:<8} {:<6} {:<21} RENEWED", "NAME", "KIND", "VER", "TOKEN", "STATUS", "SEEN");
+    println!("{:<24} {:<15} {:>3}  {:<8} {:<6} {:<21} RENEWED", "NAME", "KIND", "VER", "TOKEN", "STATUS", "SEEN");
     for c in reply.credentials {
         println!(
-            "{:<24} {:<12} {:>3}  {:<8} {:<6} {:<21} {}",
+            "{:<24} {:<15} {:>3}  {:<8} {:<6} {:<21} {}",
             c.name,
             c.kind.label(),
             c.version,
@@ -700,6 +706,9 @@ fn health(paths: &Paths) -> Result<(), VaultError> {
                 _ => "by the vault",
             }
         );
+        if let Some(reason) = c.reason {
+            println!("{:<24} {reason}", "");
+        }
     }
     Ok(())
 }
