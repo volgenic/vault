@@ -48,9 +48,6 @@ use crate::wallet::{self, CancelArgs, SignArgs};
 /// After a renewal that failed (not refused), the vault sends none for that login for this long,
 /// so calls during a token server's outage don't each send one.
 const RENEW_RETRY: Duration = Duration::from_secs(60);
-/// After a renewal that worked, an early one (the login due but not expired) waits this long, so
-/// a provider whose tokens last less than the kind's `ahead_secs` isn't renewed every minute.
-const RENEW_EARLY_GAP: Duration = Duration::from_secs(3600);
 
 /// Streamed model calls hold their connection for minutes, so there is room for many at once.
 const MAX_CONNECTIONS: usize = 128;
@@ -516,13 +513,14 @@ impl Server {
             Request::AddSealed { name, kind, sealed_base64, replace } => {
                 let result = (|| {
                     // R40: a sealed value may replace a stored one only for a kind whose hosts and
-                    // headers the kind table fixes (`claude_plan`, `codex_login`, `grok_login`).
+                    // headers the kind table fixes (`claude_plan`, `codex_login`, `grok_login`,
+                    // `google_ai_login`).
                     // Anyone can seal to the intake key, so replacing an API key's value would also
                     // replace its rule and could send that name's agent traffic to another host.
                     // A sealed login (a new sign-in) is the vault's to renew from the start.
                     if replace && kinds::spec(kind).is_none() {
                         return Err(VaultError::SealedInvalid(format!(
-                            "a sealed value can't replace a stored {}; only a kind with fixed hosts (claude_plan, codex_login, grok_login) can be replaced this way",
+                            "a sealed value can't replace a stored {}; only a kind with fixed hosts (claude_plan, codex_login, grok_login, google_ai_login) can be replaced this way",
                             kind.label()
                         )));
                     }
@@ -1227,10 +1225,10 @@ impl Server {
                 held.detail = Some("the upstream answered 401 and no renewal can fix it; answered as an error line, not a 401".into());
                 self.audit(held);
                 if unclaimed {
-                    self.observe(record, HealthState::Expired, Some(401));
+                    self.observe(record, HealthState::Expired, Some(401), None);
                     return refuse(VaultError::LoginAwaitingClaim, event, out);
                 }
-                self.observe(record, HealthState::Refused, Some(401));
+                self.observe(record, HealthState::Refused, Some(401), None);
                 return refuse(VaultError::CredentialRefused, event, out);
             }
             event.status = outcome.status;
@@ -1252,7 +1250,7 @@ impl Server {
             ));
             self.audit(event);
             if let Some(state) = outcome.health {
-                self.observe(record, state, outcome.status);
+                self.observe(record, state, outcome.status, outcome.reason);
             }
             return match (outcome.head_sent, &outcome.error) {
                 (false, Some(error)) if outcome.end != "cancelled" => error_reply(out, peer, error),
@@ -1288,7 +1286,7 @@ impl Server {
     ///
     /// Back-off: within `RENEW_RETRY` of a failed renewal nothing is sent (an error says so).
     /// With `early` (the login is due, not because a call was refused), a login that is not
-    /// expired yet and was renewed within `RENEW_EARLY_GAP` isn't renewed again.
+    /// expired yet and was renewed within its kind's `early_gap_secs` isn't renewed again.
     fn renew_login(&self, id: &str, seen: u64, why: &str, early: bool) -> Result<Arc<VaultDoc>, VaultError> {
         let lock = {
             let mut locks = self.renewing.lock().unwrap_or_else(|e| e.into_inner());
@@ -1314,7 +1312,10 @@ impl Server {
                     "the login's last renewal failed under a minute ago; the vault tries again after that".into(),
                 ));
             }
-            Some((at, true)) if early && at.elapsed() < RENEW_EARLY_GAP && record.expires_at.is_some_and(|exp| exp > crate::now_unix()) => {
+            Some((at, true))
+                if early
+                    && at.elapsed() < Duration::from_secs(refresher.early_gap_secs)
+                    && record.expires_at.is_some_and(|exp| exp > crate::now_unix()) => {
                 return Ok(Arc::clone(&doc));
             }
             _ => {}
@@ -1340,7 +1341,7 @@ impl Server {
                             log(&format!("renewed {} (version {}), but its backup failed: {error}", summary.name, summary.version));
                         }
                         let mut book = self.health.lock().unwrap_or_else(|e| e.into_inner());
-                        book.observe(&summary.id, summary.version, HealthState::Works, None, crate::now_rfc3339());
+                        book.observe(&summary.id, summary.version, HealthState::Works, None, None, crate::now_rfc3339());
                         drop(book);
                         log(&format!("renewed {} (version {})", summary.name, summary.version));
                     }
@@ -1362,7 +1363,7 @@ impl Server {
                 event.outcome = "denied: credential_refused".into();
                 event.detail = Some(format!("version {seen}: the token server refused it; sign in again"));
                 self.audit(event);
-                self.observe(record, HealthState::Refused, None);
+                self.observe(record, HealthState::Refused, None, None);
                 Err(VaultError::CredentialRefused)
             }
             Err(error) => {
@@ -1377,9 +1378,9 @@ impl Server {
     }
 
     /// Records what a reply said about a credential, and writes the book when the state changed.
-    fn observe(&self, record: &Record, state: HealthState, status: Option<u16>) {
+    fn observe(&self, record: &Record, state: HealthState, status: Option<u16>, reason: Option<&str>) {
         let mut book = self.health.lock().unwrap_or_else(|e| e.into_inner());
-        if book.observe(&record.id, record.version, state, status, crate::now_rfc3339()) {
+        if book.observe(&record.id, record.version, state, status, reason, crate::now_rfc3339()) {
             if let Ok(doc) = self.snapshot() {
                 book.prune(&doc);
             }

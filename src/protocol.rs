@@ -957,6 +957,10 @@ pub struct CredentialHealth {
     pub checked_at: Option<String>,
     /// The upstream status that said so.
     pub status: Option<u16>,
+    /// Why, when the upstream said more than its status: a Google AI login refused under Google's
+    /// Terms of Service. A fixed sentence, never the upstream's own text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// `never`: the vault doesn't renew this kind (a Claude plan's token lasts a year; a new
     /// sign-in replaces it). `by_vault`: the vault renews it before it expires and on an auth
     /// error. `awaiting_claim`: an imported login the host's daemon may still be renewing; the

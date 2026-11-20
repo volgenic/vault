@@ -1,7 +1,7 @@
 # volgenic/vault
 
 Volgenic's vault keeps your agents' secrets (API keys, website logins, 2FA seeds, Claude plan
-tokens, Codex and Grok logins, your personal details, your applications' build and deploy
+tokens, Codex, Grok and Google AI logins, your personal details, your applications' build and deploy
 secrets, and your agents' wallet keys) on your own
 machine (a Mac, or a Linux box such as the always-on primary host), and lets agents **use** them
 without ever **seeing** them. An agent asks the vault to make
@@ -91,10 +91,10 @@ From a release, with no Rust toolchain (the Linux builds are static; see
 [docs/releasing.md](docs/releasing.md) for every target and how releases are made):
 
 ```sh
-curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.5.0/vault-0.5.0-x86_64-unknown-linux-musl.tar.gz
-curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.5.0/SHA256SUMS
+curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.6.0/vault-0.6.0-x86_64-unknown-linux-musl.tar.gz
+curl -fsSLO https://github.com/volgenic/vault/releases/download/v0.6.0/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
-tar xzf vault-0.5.0-x86_64-unknown-linux-musl.tar.gz && vault-0.5.0-x86_64-unknown-linux-musl/vault install
+tar xzf vault-0.6.0-x86_64-unknown-linux-musl.tar.gz && vault-0.6.0-x86_64-unknown-linux-musl/vault install
 ```
 
 Or from source:
@@ -124,11 +124,12 @@ Or restore a backup: `vault install --for-restore`, then `vault restore FILE`.
   recovery key does, and never names a machine. Its first 12 digits are the recovery-key
   fingerprint on the kit. The `vault_id` is the copy: new at every restore, and the prefix of
   the backup files' names.
-- **The vault file and backups are format 8** (format 2 plus the `claude_plan` kind and the
+- **The vault file and backups are format 9** (format 2 plus the `claude_plan` kind and the
   intake key in format 3, the `codex_login` and `grok_login` kinds and a login's handover
   state in format 4, the `personal_details` kind in format 5, the `app_secret` kind with its
   application and lease flag in format 6, the `wallet` kind with its chain, address, caps and
-  last day's payments in format 7, and Solana and Tron wallets in format 8). An older vault file is migrated at the daemon's first start, as a change of
+  last day's payments in format 7, Solana and Tron wallets in format 8, and the `google_ai_login`
+  kind in format 9). An older vault file is migrated at the daemon's first start, as a change of
   its own (audited and backed up): a format-1 file's secrets get their ids, and a format-2 file
   gets its intake key. Older backups restore too. An older build refuses a newer file or backup
   as newer (`newer_format`); don't go back to an older build after upgrading.
@@ -144,7 +145,7 @@ The `vault` tool can't print a secret, so it is safe for any agent on the machin
 | `vault add NAME --kind login --site SITE --username USER` | Adds a login. The in-app browser fills it into a page on that site; see "Logins in the browser" below. |
 | `vault add NAME --kind 2fa --site SITE` | Adds a 2FA seed: base32, or an `otpauth://` link. |
 | `vault add NAME --kind claude_plan` | Adds a Claude plan's token (from `claude setup-token`). Used only by `stream`, only to `api.anthropic.com`. The host's daemon normally stores plans itself (`import_plan`, `add_sealed`). |
-| `vault add NAME --kind codex_login --yes < auth.json` | Adds a Codex login (its `auth.json`, whole), which the vault alone renews from then on. Used only by `stream`, only to `chatgpt.com`. `grok_login` likewise for Grok Build, to `cli-chat-proxy.grok.com`. The host's daemon normally hands logins over itself (`import_login` and `claim_refresh`, or `add_sealed`). |
+| `vault add NAME --kind codex_login --yes < auth.json` | Adds a Codex login (its `auth.json`, whole), which the vault alone renews from then on. Used only by `stream`, only to `chatgpt.com`. `grok_login` likewise for Grok Build, to `cli-chat-proxy.grok.com`; `google_ai_login` for a Google AI Pro or Ultra plan (agy's token file, `antigravity-cli/antigravity-oauth-token`), to Google's Cloud Code. The host's daemon normally hands logins over itself (`import_login` and `claim_refresh`, or `add_sealed`). |
 | `vault add NAME --kind personal_details` | Adds your real details (name, address, birthday, phone), asked one field at a time; leave any empty. Or `--yes` with v1's JSON object on standard input (`{"name","address","birthday","phone"}`). Stored and listed only, for now: `list` says which fields are filled, never what they say. See "Personal details" below. |
 | `vault add NAME --kind app_secret --app APP [--leasable]` | Adds one of an application's build or deploy secrets (an npm token, a database URL). With `--leasable` a build may lease it, sealed to the build's own key for at most a day; without it, it is stored and listed only. Set only when it is added. See "App secrets and leases" below. |
 | `vault wallet create NAME --per-payment USD --daily USD [--chain ethereum\|solana\|tron\|sepolia\|solana_devnet\|tron_nile] [fee caps]` | Makes a wallet: the vault makes its key and never shows it, and prints the address to fund. Asks for the recovery key. Fee caps, the wallet's chain's only: `--max-fee-gwei 100 --daily-fees-eth 0.02` (Ethereum), `--max-priority-fee-micro-lamports 1000000 --daily-fees-sol 0.05` (Solana), `--max-fee-limit-trx 30 --daily-fees-trx 300` (Tron), those being the defaults. See "Wallets" below. |
@@ -152,7 +153,7 @@ The `vault` tool can't print a secret, so it is safe for any agent on the machin
 | `vault delete NAME` | Deletes a secret. Earlier backups keep it. A wallet isn't deleted: its key is the only way to its funds. |
 | `vault rename NAME NEW` | Renames a secret; its id, rule and value stay, its version goes up. |
 | `vault list` | Ids, names, kinds, versions and sites; for personal details, which fields are filled; for app secrets, the application and whether builds may lease it; for wallets, the address, the caps and what the last 24 hours spent. |
-| `vault health` | For each Claude plan, Codex login and Grok login, by name: whether it works, has expired or was refused (sign in again), and who renews it. |
+| `vault health` | For each Claude plan and Codex, Grok or Google AI login, by name: whether it works, has expired or was refused (sign in again), and who renews it. |
 | `vault status [--json]` | The program, the daemon, backups and the audit chain. `--json`: one JSON object for a program, with a `problems` list and the command for each ([docs/json.md](docs/json.md)); no secret names. |
 | `vault --version` | The version, the commit it was built from and the target. |
 | `vault audit [--all]` | The audit log's last 25 lines (`--all`: every line), with its hash chain checked. Past 4 MiB `audit.log` moves to `audit.log.<n>` and the chain carries on in a new file; all are kept. `status` and `audit` check the lines written since the daemon last checked; `--all` and the daemon's start check every file from the first line. |
@@ -195,13 +196,15 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   Redirects come back to you unfollowed. A reply that contains the key is withheld
   (`echo_blocked`).
 - **`stream`** is the streaming proxy, for model calls (the host's model proxy sends it). It
-  names a secret whose kind (`claude_plan`, `codex_login`, `grok_login`; the table is
+  names a secret whose kind (`claude_plan`, `codex_login`, `grok_login`, `google_ai_login`; the table is
   `src/kinds.rs`) or rule (an API key) decides the upstream host, methods and paths, and which
   headers the vault sets: you never choose those. A Codex login goes to `chatgpt.com` under
   `/backend-api/codex` (and `/backend-api/wham/usage`) with `authorization: Bearer <access token>`
   and `chatgpt-account-id`; a Grok login to `cli-chat-proxy.grok.com` under `/v1` with
   `authorization: Bearer <access token>` (your `x-xai-token-auth` and `x-grok-*` headers pass
-  through). For a login the vault renews, a call that finds it due renews it first, and a 401
+  through); a Google AI login to `daily-cloudcode-pa.googleapis.com` (or `cloudcode-pa`) at
+  `/v1internal:<method>` with `authorization: Bearer <access token>` (`x-goog-api-key`, `cookie`
+  and `x-goog-user-project` are refused). For a login the vault renews, a call that finds it due renews it first, and a 401
   from the upstream is held back: the vault renews the login and makes the call once more, so
   you see the second reply only. **A login's 401 never reaches you as a 401** (Codex fails the
   turn on one, Grok retries it four times): when no renewal can fix it, the call ends with one
@@ -227,20 +230,22 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   `authorization`, `x-api-key`, `accept-encoding`, `host`, `content-length` or hop-by-hop
   headers: they are refused (`header_not_allowed`). The reply is unencoded (the vault asks for
   `identity`), and a reply that would carry the token is stopped before it does (`echo_blocked`).
-- **`health`** returns `{"ok":true,"credentials":[{"id","name","kind","version","state","checked_at","status","refresh","expires_at"}]}`
-  for every Claude plan, Codex login and Grok login, by name only: `state` is `works`, `expired`
+- **`health`** returns `{"ok":true,"credentials":[{"id","name","kind","version","state","checked_at","status","refresh","expires_at","reason"?}]}`
+  for every Claude plan and Codex, Grok or Google AI login, by name only: `state` is `works`, `expired`
   (also: past its expiry and not renewed), `refused` (sign in again) or `unknown` (not used since
   it was stored), from the last reply that said; `refresh` is `never` (a plan's token lasts a year,
   and a new sign-in replaces it), `by_vault` (the vault alone renews it) or `awaiting_claim` (an
   imported login the host's daemon hasn't handed over yet; the vault uses it but doesn't renew it).
+  `reason`, when present, is a fixed sentence saying more than the status: today only a Google AI
+  login that Google refused under its Terms of Service (a 403 `PERMISSION_DENIED` naming them).
 - **`add_sealed`** stores a value that reached this machine sealed to the vault's intake key (in
   `vault status --json`, `intake`), so Volgenic's server could carry it without reading it:
   `{"op":"add_sealed","name":"main","kind":"claude_plan","sealed_base64":"<base64 of an age file>","replace":true}`.
   What is sealed is `{"v":1,"name","kind","site"?,"rule"?,"username"?,"value"}`; `name` and `kind`
   must match the request's, and the rule is read only from inside it. `replace` replaces a stored
-  secret of that name and kind (same id, version up), for a `claude_plan`, `codex_login` or
-  `grok_login` only, whose hosts the vault fixes; a sealed login's `value` is its `auth.json`,
-  whole, and it is the vault's alone to renew from the start (a new sign-in); a sealed API key can only be added under a new name, never replace a stored one
+  secret of that name and kind (same id, version up), for a `claude_plan`, `codex_login`,
+  `grok_login` or `google_ai_login` only, whose hosts the vault fixes; a sealed login's `value` is
+  its `auth.json` (a Google AI login's, agy's token file), whole, and it is the vault's alone to renew from the start (a new sign-in); a sealed API key can only be added under a new name, never replace a stored one
   (`sealed_invalid`), since that would let whoever sealed it change where the key is sent. Delete with `delete` by name, as for any secret.
   Sealed personal details carry v1's object as a JSON string in `value`
   (`{"v":1,"name":"v1-details","kind":"personal_details","value":"{\"name\":\"...\",\"address\":\"...\"}"}`);
@@ -317,6 +322,30 @@ more than it can already do by reading the vault's key file; the vault keeps pas
 agents' normal path, and every fill is an audit line naming the program that asked. Agents in
 containers can't reach the socket at all. When Volgenic for Mac is signed with a team's Developer
 ID and the hardened runtime, `fill` can require that signature of its caller.
+
+## A Google AI login (Antigravity)
+
+A Google AI Pro or Ultra plan, signed in with Antigravity's `agy` (work item #8147; design page
+https://volgenic.com/pages/723f1bb8-14c0-4e82-a7b8-a4ed80ba93a9). The host names it
+`google_ai.pro` or `google_ai.ultra`, from `loadCodeAssist`'s tier.
+
+- **What it takes:** agy's token file, whole,
+  `{"token":{"access_token","token_type","refresh_token","expiry","expires_in"},"auth_method":"consumer"}`,
+  sealed (`add_sealed`, normally) or piped to `vault add NAME --kind google_ai_login --yes`. It
+  must be a personal sign-in (`auth_method` `consumer`) with a refresh token: a container's
+  placeholder (no refresh token), a business sign-in or a Google API key (`AIza...`) is refused.
+- **Where it goes:** `stream` only, `POST` or `GET` to `daily-cloudcode-pa.googleapis.com` (the
+  default) or `cloudcode-pa.googleapis.com`, at `/v1internal:<method>` or under `/v1internal/`,
+  with `authorization: Bearer <access token>`.
+- **Renewal:** the vault alone renews it, 10 minutes before its access token expires (they last
+  about an hour), at `oauth2.googleapis.com/token` with agy's installed-app OAuth client (the id
+  and secret compiled into agy 1.5.13, in `src/logins.rs`). A new refresh token in the reply
+  replaces the old. Only `invalid_grant` means sign in again; a 401 `invalid_client` (a client
+  Google no longer knows) is tried again later, like a 429 or a 5xx.
+- **Health:** a 2xx works; a 401 `UNAUTHENTICATED` is held back, renewed and retried once, and is
+  `expired` or `refused` when that can't fix it; a 403 `PERMISSION_DENIED` naming the Terms of
+  Service is `refused`, with a `reason` saying so; a 429 `RESOURCE_EXHAUSTED` (the plan's quota)
+  or a 5xx says nothing about the token.
 
 ## Handing over a Codex or Grok login
 
@@ -572,7 +601,8 @@ bumps" below).
 A Rust (Cargo) project with no native shim: `cargo build` is the gate, on macOS or Linux.
 `cargo build --features test-upstream` is for local evidence only and never released: its
 daemon sends every kind's hosts and token servers (`api.anthropic.com`, `chatgpt.com`,
-`auth.openai.com`, `cli-chat-proxy.grok.com`, `auth.x.ai`) to `127.0.0.1:$VAULT_TEST_UPSTREAM_PORT` and also trusts the CA in
+`auth.openai.com`, `cli-chat-proxy.grok.com`, `auth.x.ai`, `daily-cloudcode-pa.googleapis.com`,
+`cloudcode-pa.googleapis.com`, `oauth2.googleapis.com`) to `127.0.0.1:$VAULT_TEST_UPSTREAM_PORT` and also trusts the CA in
 `$VAULT_TEST_CA`, so a local test server can stand in for Anthropic over real TLS.
 Release builds (static Linux, and macOS on a Mac): `scripts/release.sh`, described in
 [docs/releasing.md](docs/releasing.md).

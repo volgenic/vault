@@ -64,6 +64,8 @@ pub struct UpstreamPlan {
     pub set: Vec<(String, String, String, HeaderSource)>,
     /// How a reply says the credential works, for kinds with an entry.
     pub classify: Option<fn(u16, &[u8]) -> Option<HealthState>>,
+    /// Why a reply refused the credential, for kinds that can say (`KindSpec::reason`).
+    pub reason: Option<fn(u16, &[u8]) -> Option<&'static str>>,
 }
 
 /// Decides what a `stream` request may do with this record (R7 to R9, R39). Pure.
@@ -94,6 +96,7 @@ pub(crate) fn plan(
             headers: rules::check_agent_headers(rule, headers)?,
             set: vec![(rule.header_name.clone(), rule.header_prefix.clone(), rule.header_suffix.clone(), HeaderSource::Token)],
             classify: None,
+            reason: None,
         });
     }
     let spec = kinds::spec(record.kind).ok_or(VaultError::WrongKind)?; // R5
@@ -127,6 +130,7 @@ pub(crate) fn plan(
         headers,
         set,
         classify: Some(spec.classify),
+        reason: Some(spec.reason),
     })
 }
 
@@ -158,7 +162,7 @@ impl<'a> Credential<'a> {
     /// access token, refresh token and account id read out of its stored form.
     pub(crate) fn of(record: &'a Record) -> Result<Credential<'a>, VaultError> {
         match record.kind {
-            Kind::CodexLogin | Kind::GrokLogin => {
+            Kind::CodexLogin | Kind::GrokLogin | Kind::GoogleAiLogin => {
                 let (access, refresh, account_id) = crate::logins::access(record.kind, &record.value)?;
                 Ok(Credential { token: Held::Owned(access), account_id, also_watch: vec![refresh] })
             }
@@ -185,6 +189,8 @@ pub struct Outcome {
     /// What went wrong before the head (for the error line) or after it.
     pub error: Option<VaultError>,
     pub health: Option<HealthState>,
+    /// Why, when the kind says more than the status (`KindSpec::reason`).
+    pub reason: Option<&'static str>,
     pub head_after: Option<Duration>,
     pub took: Duration,
 }
@@ -308,6 +314,7 @@ impl Streamer {
             end: "upstream_failed",
             error: None,
             health: None,
+            reason: None,
             head_after: None,
             took: Duration::ZERO,
         };
@@ -419,6 +426,7 @@ impl Streamer {
         // A 2xx head already says the credential was accepted, however the body ends; an error
         // reply says why from its body.
         outcome.health = plan.classify.and_then(|classify| classify(status, &sample));
+        outcome.reason = plan.reason.and_then(|reason| reason(status, &sample));
         outcome.took = started.elapsed();
         outcome
     }
