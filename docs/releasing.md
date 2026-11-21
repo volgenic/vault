@@ -22,6 +22,9 @@ and the like): a static binary finds them on Debian, Ubuntu, Fedora and Alpine t
 ## Prerequisites
 
 - `rustup` (the script adds the targets it needs).
+- For the macOS target: the Xcode Command Line Tools' `swiftc` (`xcode-select --install`).
+  build.rs compiles `src/macos/security.swift` (the Secure Enclave and Touch ID) into the binary;
+  the Swift runtime it uses ships with macOS.
 - For the Linux targets: [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild)
   (`cargo install cargo-zigbuild`) and [zig](https://ziglang.org/download/) on `PATH` (0.13 works).
   Zig is the C cross compiler that `ring` (rustls's crypto) needs for aarch64, and the musl linker.

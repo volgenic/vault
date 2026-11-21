@@ -34,8 +34,9 @@ use crate::protocol::{
     self, AddReply, AddSealedReply, AuditReply, BackupReply, ClaimReply, ConfirmKitReply, Envelope, ErrorReply, Framed,
     HealthReply, ImportLoginReply, ImportReply, ImportedLogin, ImportedPlan, ListReply, MirrorPlanReply, OkReply,
     CancelReply, LeaseReply, LeasedSecret, ProxyReplyOut, ReadBackupReply, RenameReply, Request, ResetReply, RestoreReply, SignReply,
-    SignedTx, StatusReply, TotpReply, VerifyBackupReply, WalletReply,
+    SignedTx, StatusReply, TotpReply, UpdateLoginReply, VerifyBackupReply, WalletReply,
 };
+use crate::presence;
 use crate::proxy::{self, ProxyRequest};
 use crate::rules;
 use crate::store::{self, OwnerPaths, Paths};
@@ -133,7 +134,14 @@ pub fn run() -> Result<(), VaultError> {
     }
     let listener = UnixListener::bind(&paths.socket)?;
     // Only the owner can reach it: the folder is 0700, and every caller is checked (R22).
-    log(&format!("vault key: {}", keyprotect::describe(&paths.dir)));
+    log(&format!(
+        "vault key: {}; opened with the {} key",
+        keyprotect::describe(&paths.dir),
+        keyprotect::loaded_from().unwrap_or("no")
+    ));
+    if cfg!(feature = "test-stubs") {
+        log("WARNING: a test-stubs build: a stand-in Secure Enclave and Touch ID (VAULT_TEST_ENCLAVE_KEY, VAULT_TEST_PRESENCE); never a release");
+    }
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
 
     let snapshot = match &opened {
@@ -298,6 +306,8 @@ struct StreamCall {
 
 struct Caller {
     peer: Peer,
+    /// The peer's audit token read at accept (macOS), for the signed-app check (#7689).
+    token: Option<platform::PeerToken>,
     envelope: Envelope,
 }
 
@@ -401,7 +411,8 @@ impl Server {
     fn handle(&self, mut stream: UnixStream) {
         // R22: only the owner's user ID. R23: the caller's pid and program are a hint.
         let Some(peer) = platform::peer_of(stream.as_raw_fd()) else { return };
-        let mut peer = Caller { peer, envelope: Envelope::default() };
+        let token = platform::peer_token(stream.as_raw_fd());
+        let mut peer = Caller { peer, token, envelope: Envelope::default() };
         if peer.peer.uid != self.owner_uid {
             let mut event = AuditEvent::new("connect", "denied: not the owner's user ID");
             event.detail = Some(format!("uid {}", peer.peer.uid));
@@ -646,6 +657,7 @@ impl Server {
                         pid: std::process::id(),
                         uid: unsafe { libc::getuid() },
                         key_protection: keyprotect::describe(&self.paths.dir),
+                        key_source: keyprotect::loaded_from().map(str::to_string),
                         local_backups: self.paths.local_backups.display().to_string(),
                         restore_point: vault::has_restore_point(&self.paths),
                         vault: opened,
@@ -690,6 +702,29 @@ impl Server {
             Request::Fill { secret, origin, fields, engine, tab, on_behalf_of } => {
                 let notes = [fill::note(engine), fill::note(tab), fill::note(on_behalf_of)];
                 self.fill(stream, peer, &secret, &origin, &fields, &notes)
+            }
+            Request::UpdateLogin { secret, username, site } => {
+                let result = (|| {
+                    // By id only: a `rename` (which the hub can relay) can't point the edit at
+                    // another login.
+                    if matches!(secret, SecretRef::Name(_)) {
+                        return Err(VaultError::BadRequest(
+                            "update_login names the login by its \"id\" (from `list`), never by its name".into(),
+                        ));
+                    }
+                    // A site change moves where the password is filled: the person confirms it
+                    // with Touch ID or their login password, asked with the vault unlocked (R46, R47).
+                    let change = match site.as_deref() {
+                        Some(site) => vault::site_change(&*self.snapshot()?, &secret, site)?,
+                        None => None,
+                    };
+                    if let Some(change) = &change {
+                        presence::confirm(&change.act(), &peer.peer)?;
+                    }
+                    self.with_vault(|vault| vault.update_login(&secret, username.as_deref(), site.as_deref(), change.as_ref()))
+                })()
+                .map(|(secret, changed, backup)| UpdateLoginReply { ok: true, secret, changed, backup });
+                self.finish(stream, peer, "update-login", Some(&secret.label()), result)
             }
             Request::GenerateLogin { name, site, username, length } => {
                 let result = self
@@ -926,6 +961,9 @@ impl Server {
     ) -> std::io::Result<()> {
         let [engine, tab, on_behalf_of] = notes;
         let result = (|| -> Result<WipingBuf, VaultError> {
+            if fill::needs_signed_app(engine.as_deref()) {
+                platform::peer_is_volgenic_app(out.as_raw_fd(), peer.token).map_err(VaultError::NotVolgenicApp)?;
+            }
             let fields = fill::parse_fields(fields)?;
             let doc = self.snapshot()?;
             let record = doc.find_ref(secret);

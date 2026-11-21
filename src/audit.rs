@@ -90,7 +90,7 @@ const RECENT_CHANGES: usize = 5;
 pub fn is_change(event: &str) -> bool {
     matches!(
         event,
-        "add" | "replace" | "import-plan" | "renew" | "delete" | "rename" | "restore" | "confirm-kit" | "init" | "reset"
+        "add" | "replace" | "import-plan" | "renew" | "delete" | "rename" | "update-login" | "restore" | "confirm-kit" | "init" | "reset"
             | "migrate"
     )
 }
