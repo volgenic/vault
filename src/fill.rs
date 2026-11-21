@@ -70,6 +70,13 @@ pub fn parse_fields(names: &[String]) -> Result<Vec<Field>, VaultError> {
     Ok(fields)
 }
 
+/// Whether a fill must come from Volgenic for Mac's signed app (#7689): one that says it is the
+/// app (`engine:"app"`) is checked to be it (`platform::peer_is_volgenic_app`). The host daemon's
+/// Chrome engine keeps the owner's-user-ID check alone (R22).
+pub fn needs_signed_app(engine: Option<&str>) -> bool {
+    engine == Some("app")
+}
+
 /// A note for the audit line (`engine`, `tab`, `on_behalf_of`): printable, at most 128 characters.
 pub fn note(text: Option<String>) -> Option<String> {
     text.map(|text| text.chars().filter(|c| !c.is_control()).take(MAX_NOTE_CHARS).collect::<String>())

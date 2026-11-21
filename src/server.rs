@@ -133,7 +133,14 @@ pub fn run() -> Result<(), VaultError> {
     }
     let listener = UnixListener::bind(&paths.socket)?;
     // Only the owner can reach it: the folder is 0700, and every caller is checked (R22).
-    log(&format!("vault key: {}", keyprotect::describe(&paths.dir)));
+    log(&format!(
+        "vault key: {}; opened with the {} key",
+        keyprotect::describe(&paths.dir),
+        keyprotect::loaded_from().unwrap_or("no")
+    ));
+    if cfg!(feature = "test-stubs") {
+        log("WARNING: a test-stubs build: a stand-in Secure Enclave and Touch ID (VAULT_TEST_ENCLAVE_KEY, VAULT_TEST_PRESENCE); never a release");
+    }
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
 
     let snapshot = match &opened {
@@ -298,6 +305,8 @@ struct StreamCall {
 
 struct Caller {
     peer: Peer,
+    /// The peer's audit token read at accept (macOS), for the signed-app check (#7689).
+    token: Option<platform::PeerToken>,
     envelope: Envelope,
 }
 
@@ -401,7 +410,8 @@ impl Server {
     fn handle(&self, mut stream: UnixStream) {
         // R22: only the owner's user ID. R23: the caller's pid and program are a hint.
         let Some(peer) = platform::peer_of(stream.as_raw_fd()) else { return };
-        let mut peer = Caller { peer, envelope: Envelope::default() };
+        let token = platform::peer_token(stream.as_raw_fd());
+        let mut peer = Caller { peer, token, envelope: Envelope::default() };
         if peer.peer.uid != self.owner_uid {
             let mut event = AuditEvent::new("connect", "denied: not the owner's user ID");
             event.detail = Some(format!("uid {}", peer.peer.uid));
@@ -646,6 +656,7 @@ impl Server {
                         pid: std::process::id(),
                         uid: unsafe { libc::getuid() },
                         key_protection: keyprotect::describe(&self.paths.dir),
+                        key_source: keyprotect::loaded_from().map(str::to_string),
                         local_backups: self.paths.local_backups.display().to_string(),
                         restore_point: vault::has_restore_point(&self.paths),
                         vault: opened,
@@ -926,6 +937,9 @@ impl Server {
     ) -> std::io::Result<()> {
         let [engine, tab, on_behalf_of] = notes;
         let result = (|| -> Result<WipingBuf, VaultError> {
+            if fill::needs_signed_app(engine.as_deref()) {
+                platform::peer_is_volgenic_app(out.as_raw_fd(), peer.token).map_err(VaultError::NotVolgenicApp)?;
+            }
             let fields = fill::parse_fields(fields)?;
             let doc = self.snapshot()?;
             let record = doc.find_ref(secret);

@@ -23,10 +23,13 @@ leaves it at all; agents' payments get the vault's signature, within caps only y
 `cfg` in a few small modules (see `AGENTS.md`). On Linux the vault comes back by itself after a
 reboot or a power cut, with nobody logged in.
 
-Deliberately simple: the bar is "better than plaintext secrets on a server", not an enterprise
-security system. The vault keeps secrets out of agents' normal path (they use them without
-seeing them), not out of reach of code running as you: the key file and the vault file are
-yours. The threat model's "Current design" block says what that accepts.
+On a Mac the bar is Apple Passwords' (#7689): the vault key is wrapped by the Mac's Secure
+Enclave, so a copy of the disk or a backup can't open the vault on another Mac; the person's own
+sensitive acts (seeing a password, an export, using a card, as each arrives) ask for Touch ID
+or the login password; and only Volgenic's signed app may fill as the app. The vault keeps secrets out of
+agents' normal path (they use them without seeing them), not out of reach of code running as you
+on this machine: the vault serves agents unattended, so it can't ask you each time. The threat
+model's top block says what that accepts, compared with Apple Passwords and Proton Pass.
 
 ## How it runs on macOS
 
@@ -35,19 +38,42 @@ Everything is yours, under `~/Library/Application Support/Volgenic/` (folders 07
 | Part | Where |
 |---|---|
 | The program | `bin/vault` |
-| Vault file (encrypted, XChaCha20-Poly1305), vault key (`vault.key`, 32 random bytes, 0600), audit log | `vault/` |
+| Vault file (encrypted, XChaCha20-Poly1305), vault key, audit log | `vault/`, kept out of Time Machine: the key is `vault.key.se`, wrapped by the Secure Enclave, when the Mac has one (every Apple silicon Mac, and Intel Macs with a T2 chip); else `vault.key`, 32 random bytes, 0600 |
 | Local backups (age files, ciphertext) | `vault-backups/` |
 | The socket | `socket/vault.sock` |
 | The daemon's job, `com.volgenic.vault` | `~/Library/LaunchAgents/com.volgenic.vault.plist` |
 | The daemon's log | `~/Library/Logs/Volgenic/vault.log` |
-| The Recovery Kit (the key that opens backups) | `~/Volgenic Vault Recovery Kit.txt`, 0600 |
+| The Recovery Kit (the key that opens backups) | `~/Volgenic Vault Recovery Kit.txt`, 0600, kept out of Time Machine |
 
-- **No sudo, no role account, no code signing, no Secure Enclave, no Keychain:** nothing the
-  vault does can show a dialog or ask for a password.
-- **The daemon is a LaunchAgent in your login.** It reads the key file, opens the socket and
+- **No sudo, no role account, no Keychain.**
+- **The vault key is wrapped by the Secure Enclave.** A new vault's key is wrapped straight from
+  memory by a P-256 key the Enclave makes (CryptoKit, `src/macos/security.swift`), unwrapped again
+  to check, and never written in plain. The wrap is bound to the vault's id. The Enclave key never
+  leaves the Enclave: `vault.key.se` holds only the Enclave's encrypted handle to it, which works
+  on this Mac alone, after its first unlock since boot. Using it asks for nothing, so the daemon
+  unwraps it at every start, unattended. On a Mac without an Enclave the key stays the 0600 file,
+  and `vault status` says so.
+- **A key that was a file is replaced, not wrapped.** That key is in every Time Machine backup
+  and APFS snapshot made while it was a file. So `vault install` makes a new key, wraps it
+  (`vault.key.se.new`), encrypts the vault file again under it, puts the new wrapped key in place,
+  and only then deletes `vault.key`. The old key no longer opens the vault. An interrupted step is
+  finished or undone by the next start or install: a key is used only if it opens the vault file.
+  Backups of `vault.bin` made before still open with the old key, so treat the secrets in them as
+  exposed if those backups are.
+- **`vault status` says what the daemon really did.** `secure_enclave` only when the running daemon
+  unwrapped its key from `vault.key.se`. It warns, loudly, while the Recovery Kit isn't confirmed,
+  FileVault is off, or the Mac logs in by itself: each leaves a stolen disk or a stolen Mac able to
+  open the vault.
+- **Touch ID only for your own sensitive acts.** Seeing a saved password (`reveal`), an export and
+  using a saved card (#7690) ask the person at the Mac (Touch ID, or the login password), in a
+  dialog the vault's daemon shows itself with the reason in words (`presence::confirm`). None of
+  the three is in the vault yet; each calls it when it arrives. Nothing an agent does asks:
+  `fill`, `lease`, `stream`, `proxy`, `totp` and `sign` stay unattended.
+- **The daemon is a LaunchAgent in your login.** It unwraps the key, opens the socket and
   serves; only your own user ID may connect.
-- **No gates.** Secrets can be stored right after install. Stash the Recovery Kit whenever you
-  like (`vault confirm-kit` is optional and deletes the file once you've pasted it back).
+- **No gates.** Secrets can be stored right after install. Stash the Recovery Kit and run
+  `vault confirm-kit` (it deletes the file once you've pasted it back) as soon as you can: until
+  then `vault status` warns that a copy of this disk opens every backup.
 - **Backups after every change** to the local folder, encrypted to the recovery key; `vault
   install-mirror` optionally copies them to another folder.
 
@@ -316,12 +342,25 @@ Neither the host daemon (for an app tab), Volgenic's server nor the agent holds 
   `fill` types it into the sign-up form (and into a "confirm password" field, with
   `"fields":["password"]`).
 
-**What this accepts.** The vault can't tell Volgenic for Mac from any other program running as
-you, so any such program can ask `fill` for a login by naming an origin on its site. That is no
-more than it can already do by reading the vault's key file; the vault keeps passwords out of
-agents' normal path, and every fill is an audit line naming the program that asked. Agents in
-containers can't reach the socket at all. When Volgenic for Mac is signed with a team's Developer
-ID and the hardened runtime, `fill` can require that signature of its caller.
+**Only Volgenic's signed app fills as the app (#7689).** A `fill` with `"engine":"app"` is
+answered only when the process on the other end of the socket is Volgenic for Mac
+(`com.volgenic.desktop`; the `.v2dev` build only in a debug build of the vault) signed with
+Volgenic's Developer ID (team `69CV53Q479`) and the hardened runtime, with none of the runtime's
+exceptions that let other code in (`get-task-allow`, `disable-library-validation`,
+`allow-dyld-environment-variables`, `allow-unsigned-executable-memory`, `debugger`), and still
+valid as it runs (`platform::peer_is_volgenic_app`). Anything else is `not_volgenic_app`, and
+nothing is filled. A self-signed or ad hoc build of the app is refused. The caller is named by its
+audit token, which XNU works out from the pid of the socket's last user when it is asked
+(`LOCAL_PEERTOKEN`), so the vault reads it at accept and again at the check and refuses a change of
+pid or pidversion. That catches a pid reused or a program exec'd during the request. It doesn't
+catch one done before the vault accepted the connection. XPC, whose every message carries its
+sender's token, is the full fix.
+
+**What this accepts.** The host daemon's Chrome engine isn't signed by Volgenic's team, so a
+`fill` that doesn't say `engine:"app"` keeps the user ID check alone, and a program running as
+you can still ask `fill` that way for a login by naming an origin on its site. That is no more
+than it can do by having the vault key unwrapped on this Mac; every fill is an audit line naming
+the program that asked, and agents in containers can't reach the socket at all.
 
 ## A Google AI login (Antigravity)
 

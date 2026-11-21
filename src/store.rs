@@ -292,6 +292,19 @@ pub(crate) fn save(paths: &Paths, key: &SecretValue, doc: &VaultDoc) -> Result<(
     write_atomic(&paths.vault_file, &out)
 }
 
+/// The vault id in the vault file's header, read without the key: what the sealed key is bound
+/// to (`keyprotect`).
+pub fn file_vault_id(paths: &Paths) -> Result<String, VaultError> {
+    let mut header = [0u8; MAGIC_LEN + ID_LEN];
+    File::open(&paths.vault_file)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .map_err(|error| VaultError::VaultFileUnreadable(error.to_string()))?;
+    if &header[..MAGIC_PREFIX.len()] != MAGIC_PREFIX {
+        return Err(VaultError::VaultFileCorrupt);
+    }
+    Ok(hex::encode(&header[MAGIC_LEN..]))
+}
+
 /// Reads and decrypts the vault file. Any change to the file, including its id or its format
 /// byte, fails here. Reads every format this build knows (1 to 4); an older document comes
 /// back as it is, and the caller migrates it (`model::migrate`, `model::ensure_intake`) and writes

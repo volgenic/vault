@@ -109,8 +109,9 @@ fn audit_event(paths: &Paths, event: AuditEvent) -> Result<String, VaultError> {
 
 /// Makes a new vault (R16, R17). Runs in `vault install`, before the daemon starts. The first
 /// backup comes from the daemon when it starts. No gate: secrets can be stored right away; the
-/// kit stays in the owner's home folder until he stashes it. Then the key is protected as well as
-/// this machine allows (`keyprotect::protect`: sealed to the TPM on Linux when there is one).
+/// kit stays in the owner's home folder until he stashes it. The key is protected as well as this
+/// machine allows (`keyprotect::store_new`: sealed from memory to the Secure Enclave or the TPM
+/// when there is one, never written in plain then).
 pub fn init(paths: &Paths, kit_path: &Path, mirror_dir: &Path) -> Result<InitReport, VaultError> {
     if store::vault_exists(paths) || keyprotect::key_exists(&paths.dir) {
         return Err(VaultError::AlreadyInitialized);
@@ -126,10 +127,13 @@ pub fn init(paths: &Paths, kit_path: &Path, mirror_dir: &Path) -> Result<InitRep
     drop(recovery_secret);
 
     let key = SecretValue::random(32)?;
-    if let Err(error) = keyprotect::store_new(&paths.dir, &key) {
-        let _ = wipe_file(kit_path);
-        return Err(error);
-    }
+    let key_protection = match keyprotect::store_new(&paths.dir, &vault_id, &key) {
+        Ok(how) => how,
+        Err(error) => {
+            let _ = wipe_file(kit_path);
+            return Err(error);
+        }
+    };
 
     let mut doc = VaultDoc {
         format: VAULT_FORMAT,
@@ -150,7 +154,6 @@ pub fn init(paths: &Paths, kit_path: &Path, mirror_dir: &Path) -> Result<InitRep
     event.detail = Some(format!("vault {vault_id}, recovery key {fingerprint}"));
     doc.audit_head = audit_event(paths, event)?;
     store::save(paths, &key, &doc)?;
-    let key_protection = keyprotect::protect(&paths.dir, &key);
     Ok(InitReport {
         vault_identity: model::vault_identity(&doc.recovery_recipient),
         key_protection,
@@ -207,6 +210,11 @@ fn write_kit(
         .map_err(|e| VaultError::Io(format!("can't create the kit at {}: {e}", path.display())))?;
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
+    // Never in a Time Machine backup (#7689): a backed-up kit opens every vault backup on any
+    // machine. Best effort; `vault status` raises the kit until it is confirmed and deleted.
+    if let Err(why) = crate::platform::exclude_from_backups(path) {
+        eprintln!("{} vault: the Recovery Kit couldn't be kept out of Time Machine: {why}", crate::now_rfc3339());
+    }
     Ok(())
 }
 
@@ -226,6 +234,73 @@ pub fn wipe_file(path: &Path) -> Result<(), VaultError> {
     Ok(())
 }
 
+/// `vault install`, with the daemon stopped: an existing vault whose key is (or was) a plain file
+/// gets a new key, sealed to this machine, so the old key, which sits in every backup and
+/// snapshot made while it was a file, no longer opens it (#7689). The steps, each safe to stop
+/// after: seal the new key as the pending file (never in plain); encrypt the vault file again
+/// under it, with an audit line; make the pending file the sealed one; unlink the old key. An
+/// interrupted re-key is finished or undone here, by which key opens the vault file. Says how the
+/// key is kept now.
+pub fn reseal(paths: &Paths) -> String {
+    let dir = &paths.dir;
+    keyprotect::clean_temps(dir);
+    let vault_id = match store::file_vault_id(paths) {
+        Ok(id) => id,
+        Err(error) => return format!("can't read the vault file to seal its key: {error}"),
+    };
+    let (old_key, mut doc, source) = match keyprotect::load(dir, &vault_id, |key| store::load(paths, key)) {
+        Ok(found) => found,
+        Err(error) => return format!("can't open the vault to seal its key: {error}"),
+    };
+    let plain_there = fs::symlink_metadata(dir.join(keyprotect::KEY_FILE)).is_ok();
+    match source {
+        // The vault file is already under the pending key: finish the re-key.
+        keyprotect::Source::Pending => {
+            return match keyprotect::commit_pending(dir) {
+                Ok(()) => format!("an interrupted re-key is finished: {}", keyprotect::describe(dir)),
+                Err(why) => format!("an interrupted re-key couldn't be finished ({why}); run `vault install` again"),
+            };
+        }
+        keyprotect::Source::Sealed => {
+            keyprotect::discard_pending(dir);
+            if !plain_there {
+                return keyprotect::describe(dir);
+            }
+        }
+        keyprotect::Source::Plain => keyprotect::discard_pending(dir),
+    }
+    drop(old_key);
+    if let Err(why) = keyprotect::seal_ready() {
+        return format!("mode-600 file ({why})");
+    }
+    let new_key = match SecretValue::random(32) {
+        Ok(key) => key,
+        Err(error) => return format!("mode-600 file (no new key: {error})"),
+    };
+    if let Err(why) = keyprotect::seal_pending(dir, &vault_id, &new_key) {
+        return format!("mode-600 file (the new key couldn't be sealed: {why})");
+    }
+    let mut event = AuditEvent::new("rekey", "ok");
+    event.detail = Some(format!("vault {vault_id}: a new vault key, sealed to this machine, replaces the one kept as a file"));
+    let saved = audit_event(paths, event).and_then(|head| {
+        doc.audit_head = head;
+        store::save(paths, &new_key, &doc)?;
+        store::load(paths, &new_key).map(|_| ())
+    });
+    if let Err(error) = saved {
+        // The vault file is written by rename, so it is the old one or the new one: `load` (here
+        // or at the daemon's start) finds the key that opens it.
+        return format!("the vault couldn't be encrypted again under a new key ({error}); the old key still opens it");
+    }
+    match keyprotect::commit_pending(dir) {
+        Ok(()) => format!(
+            "{}; a new key replaced the one kept as a file, so that key, in older backups and snapshots, no longer opens the vault",
+            keyprotect::describe(dir)
+        ),
+        Err(why) => format!("re-keyed, but {why}; run `vault install` again to finish"),
+    }
+}
+
 impl Vault {
     /// Opens the vault: reads the vault key, then decrypts the vault file. A vault file in an
     /// older format is migrated here, as a change of its own: every secret gets its id, and the
@@ -235,8 +310,9 @@ impl Vault {
         if !store::vault_exists(paths) {
             return Err(VaultError::NotInitialized);
         }
-        let key = keyprotect::load(&paths.dir)?;
-        let doc = store::load(paths, &key)?;
+        // A key is accepted only when it opens the vault file (`keyprotect::load`).
+        let vault_id = store::file_vault_id(paths)?;
+        let (key, doc, _) = keyprotect::load(&paths.dir, &vault_id, |key| store::load(paths, key))?;
         let from = doc.format;
         let mut vault = Vault { paths: paths.clone(), key, doc };
         let given = model::migrate(&mut vault.doc, store::new_random_id)?;
@@ -1335,7 +1411,7 @@ pub fn restore(
     let (check_secret, _) = backup::new_identity();
     let vault_id = store::new_vault_id()?;
     let key = SecretValue::random(32)?;
-    keyprotect::store_new(&paths.dir, &key)?;
+    let protection = keyprotect::store_new(&paths.dir, &vault_id, &key)?;
     let vault_identity = model::vault_identity(&payload.recovery_recipient);
 
     let secrets = payload.records.iter().map(Record::summary).collect();
@@ -1366,7 +1442,6 @@ pub fn restore(
     ));
     doc.audit_head = audit_event(paths, event)?;
     store::save(paths, &key, &doc)?;
-    let protection = keyprotect::protect(&paths.dir, &key);
     eprintln!("{} vault daemon: restored vault key: {protection}", crate::now_rfc3339());
     if from_restore_point {
         let _ = fs::remove_file(&paths.restore_point);

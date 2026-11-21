@@ -77,6 +77,10 @@ pub enum VaultError {
     NoSuchLogin(String),
     /// `fill`'s frame isn't `https:` on the login's registrable domain (why, never a value).
     SiteMismatch(String),
+    /// `fill` as Volgenic for Mac from a caller that isn't its signed app (why, never a value).
+    NotVolgenicApp(String),
+    /// The person at the Mac didn't confirm a sensitive act with Touch ID or their password (why).
+    NotConfirmed(String),
 }
 
 impl VaultError {
@@ -132,6 +136,8 @@ impl VaultError {
             OverCap(_) => "over_cap",
             NoSuchLogin(_) => "no_such_login",
             SiteMismatch(_) => "site_mismatch",
+            NotVolgenicApp(_) => "not_volgenic_app",
+            NotConfirmed(_) => "not_confirmed",
         }
     }
 }
@@ -191,7 +197,7 @@ impl fmt::Display for VaultError {
                 f,
                 "the vault file is format {format}, written by a newer build of the vault; install that build"
             ),
-            SealedKey(why) => write!(f, "the TPM-sealed vault key can't be opened: {why}"),
+            SealedKey(why) => write!(f, "the sealed vault key can't be opened: {why}"),
             UnsupportedProtocol(version) => write!(
                 f,
                 "protocol {version} is newer than this vault speaks (protocol {})",
@@ -221,6 +227,8 @@ impl fmt::Display for VaultError {
             OverCap(why) => write!(f, "not signed: {why}; only the person at the vault's {MACHINE} can raise a wallet's caps"),
             NoSuchLogin(name) => write!(f, "no saved login {name:?}"),
             SiteMismatch(why) => write!(f, "not the login's site, so nothing was filled: {why}"),
+            NotVolgenicApp(why) => write!(f, "only Volgenic for Mac's signed app fills as the app, so nothing was filled: {why}"),
+            NotConfirmed(why) => write!(f, "not confirmed by the person at this {MACHINE}, so nothing was done: {why}"),
         }
     }
 }

@@ -801,7 +801,7 @@ fn status(paths: &Paths) -> Result<(), VaultError> {
     }
     println!(
         "  Recovery Kit:      {}",
-        if opened.kit_confirmed { "confirmed" } else { "not confirmed yet (optional: `vault confirm-kit`)" }
+        if opened.kit_confirmed { "confirmed" } else { "not confirmed yet (`vault confirm-kit`; see the warning below)" }
     );
     if let (false, Some(kit)) = (opened.kit_confirmed, &opened.kit_path) {
         println!("                     the kit file: {kit}");
@@ -849,6 +849,8 @@ fn status(paths: &Paths) -> Result<(), VaultError> {
             println!("    {change}");
         }
     }
+    // The Recovery Kit, FileVault and automatic login, loudly (#7689).
+    print!("{}", vault::report::stolen_disk_banner(&vault::report::gather_status(paths).problems));
     Ok(())
 }
 

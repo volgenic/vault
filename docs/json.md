@@ -91,12 +91,14 @@ A list of `{code, severity, sentence, how}`, errors first:
     "restore_point": false
   },                                   // all but "initialized" are null when the daemon is down
   "key_protection": {
-    "kind": "file",                    // "tpm2" | "file" | "none"
-    "reason": "systemd-creds isn't installed",   // for "file": why not sealed; on macOS, "macOS keeps ..."
-    "plain_copy_left": false,          // "tpm2" with a plain copy still on disk
-    "sealable": false,                 // "file" on Linux that `vault install` would seal now
-    "detail": "vault key in a mode-600 file next to the vault file (no Secure Enclave, no Keychain)"
+    "kind": "file",                    // "tpm2" (Linux) | "secure_enclave" (macOS): only when the running daemon unsealed it | "unchecked" (sealed file, no daemon says it opened it) | "file" | "none"
+    "reason": "systemd-creds isn't installed",   // for "file"/"unchecked": why not (known to be) sealed; on a Mac without one, "this Mac has no Secure Enclave"
+    "plain_copy_left": false,          // a sealed key and a plain vault.key both on disk (`vault install` replaces the key)
+    "sealable": false,                 // "file" that `vault install` would seal now
+    "sealed_unusable": false,          // the daemon is running on the plain key although a sealed one is there (an error)
+    "detail": "vault key in a mode-600 file next to the vault file, not sealed to this machine"
   },
+  "disk": { "filevault_on": true, "auto_login_user": null },   // macOS only, else null; FileVault off or automatic login is a warning
   "recovery_kit": {
     "state": "pending",                // "pending" | "confirmed" | "none" (no vault) | "unknown" (daemon down)
     "path": "/home/node/Volgenic Vault Recovery Kit.txt",   // the kit file, while pending (or the default path when unknown)
@@ -125,7 +127,7 @@ A list of `{code, severity, sentence, how}`, errors first:
   },
   "problems": [
     { "code": "recovery_kit_pending", "severity": "warning",
-      "sentence": "The Recovery Kit (/home/node/Volgenic Vault Recovery Kit.txt) isn't confirmed yet: keep a copy off this machine, then confirm it, which deletes the file.",
+      "sentence": "The Recovery Kit (/home/node/Volgenic Vault Recovery Kit.txt) isn't confirmed yet. It opens every backup of this vault on any machine, so until it is confirmed and its file deleted, a copy of this disk or of its backups opens your secrets, and sealing the key to this machine doesn't protect them: keep a copy off this machine, then confirm it, which deletes the file.",
       "how": "/home/node/.local/share/volgenic/bin/vault confirm-kit" },
     { "code": "no_systemd", "severity": "warning",
       "sentence": "This machine isn't running systemd, so nothing starts the vault after a reboot; it runs only while started by hand.",

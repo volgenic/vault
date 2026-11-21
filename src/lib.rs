@@ -1,7 +1,8 @@
-//! The vault's library. Decisions live here as functions over plain values. The vault key is a
-//! mode-0600 file next to the vault file, or on Linux sealed to the TPM by systemd-creds when
-//! there is one (`keyprotect`): no Secure Enclave, no Keychain, so the vault never raises a
-//! dialog.
+//! The vault's library. Decisions live here as functions over plain values. The vault key is
+//! sealed to the machine when it can be (`keyprotect`): wrapped by the Secure Enclave on a Mac, by
+//! the TPM through systemd-creds on Linux, else a mode-0600 file next to the vault file. No
+//! Keychain item, and the only dialog is the person's own Touch ID for their sensitive acts
+//! (`presence`, R46).
 //!
 //! The vault runs as the owner: a daemon (`server`) started by a LaunchAgent in his login on
 //! macOS or by a systemd user service at boot on Linux, a command-line tool that only talks to
@@ -11,6 +12,10 @@
 //!
 //! The rules this code follows are numbered on the threat model page,
 //! https://volgenic.com/pages/4171d207-a31e-4d38-b659-60ceed9ee5fd, and cited as R1, R2, ...
+
+// The stand-ins (`test-stubs`: a fake Secure Enclave and Touch ID) never go into a release.
+#[cfg(all(feature = "test-stubs", not(debug_assertions)))]
+compile_error!("the `test-stubs` feature is for local evidence only and can't be built in release mode");
 
 pub mod audit;
 pub mod backup;
@@ -29,6 +34,7 @@ pub mod logins;
 pub mod mirror;
 pub mod model;
 pub mod platform;
+pub mod presence;
 pub mod protocol;
 pub mod proxy;
 pub mod report;

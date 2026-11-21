@@ -1267,6 +1267,10 @@ pub struct StatusReply {
     pub pid: u32,
     pub uid: u32,
     pub key_protection: String,
+    /// Which key file the daemon opened the vault with at its start (`keyprotect::loaded_from`):
+    /// `sealed`, `pending`, `plain`, or null (no vault, or a daemon too old to say).
+    #[serde(default)]
+    pub key_source: Option<String>,
     pub local_backups: String,
     pub restore_point: bool,
     pub vault: Option<OpenedStatus>,

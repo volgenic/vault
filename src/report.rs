@@ -104,13 +104,16 @@ pub struct VaultJson {
 
 #[derive(Serialize, Clone, Debug)]
 pub struct KeyJson {
-    /// `tpm2`, `file` or `none`.
+    /// `tpm2` or `secure_enclave` (only when the running daemon unsealed its key from that file),
+    /// `unchecked` (a sealed file is there, no running daemon says it opened it), `file` or `none`.
     pub kind: &'static str,
-    /// For `file`: why it isn't sealed to a TPM.
+    /// For `file` and `unchecked`: why it isn't (known to be) sealed.
     pub reason: Option<String>,
     pub plain_copy_left: bool,
-    /// For `file` on Linux: this machine could seal it now (`vault install` would).
+    /// For `file`: this machine could seal it now (`vault install` would).
     pub sealable: bool,
+    /// The daemon is running on the plain key file although a sealed key is there.
+    pub sealed_unusable: bool,
     pub detail: String,
 }
 
@@ -121,9 +124,48 @@ impl From<KeyState> for KeyJson {
             reason: state.reason,
             plain_copy_left: state.plain_copy_left,
             sealable: state.sealable,
+            sealed_unusable: state.sealed_unusable,
             detail: state.detail,
         }
     }
+}
+
+/// What protects this Mac's disk when it is off (#7689); null on Linux.
+#[derive(Serialize, Clone, Debug)]
+pub struct DiskJson {
+    /// `fdesetup status`; null when it couldn't be read.
+    pub filevault_on: Option<bool>,
+    /// The account that logs in by itself at startup; null when none.
+    pub auto_login_user: Option<String>,
+}
+
+/// How `vault status` rates what leaves the vault open to a stolen disk or a stolen Mac: an
+/// unconfirmed Recovery Kit, FileVault off, automatic login (#7689). Warnings, not errors: an
+/// error makes the host report the vault missing to agents, and the vault keeps working. They are
+/// said loudly instead (`stolen_disk_banner`, in `vault install` and `vault status`).
+const STOLEN_DISK_SEVERITY: &str = "warning";
+
+/// The problems `stolen_disk_banner` shows.
+pub const STOLEN_DISK_CODES: [&str; 3] = ["recovery_kit_pending", "filevault_off", "auto_login_on"];
+
+/// The loud block `vault install` and `vault status` end with while a stolen disk or a stolen Mac
+/// could still open the vault; empty when nothing does.
+pub fn stolen_disk_banner(problems: &[Problem]) -> String {
+    let found: Vec<&Problem> = problems.iter().filter(|p| STOLEN_DISK_CODES.contains(&p.code)).collect();
+    if found.is_empty() {
+        return String::new();
+    }
+    let mut text = format!(
+        "\n!!! WARNING: a stolen disk or {} can open this vault until you deal with this:\n",
+        crate::platform::MACHINE
+    );
+    for problem in found {
+        text.push_str(&format!("!!!   - {}\n", problem.sentence));
+        if let Some(how) = &problem.how {
+            text.push_str(&format!("!!!     run: {how}\n"));
+        }
+    }
+    text
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -200,6 +242,8 @@ pub struct StatusJson {
     pub daemon: DaemonJson,
     pub vault: VaultJson,
     pub key_protection: KeyJson,
+    /// macOS only: FileVault and automatic login.
+    pub disk: Option<DiskJson>,
     pub recovery_kit: KitJson,
     pub backup: BackupJson,
     pub boot: BootJson,
@@ -343,28 +387,58 @@ pub fn diagnose(status: &StatusJson, uid: u32) -> Vec<Problem> {
     }
 
     if status.recovery_kit.state == "pending" {
+        // The kit opens every backup on any machine, sealed key or not, so until it is confirmed
+        // and gone, a copy of this disk (or a backup of it, or the backups' mirror) opens the vault.
         let sentence = match &status.recovery_kit.path {
             Some(path) => format!(
-                "The Recovery Kit ({path}) isn't confirmed yet: keep a copy off this machine, then confirm it, which deletes the file."
+                "The Recovery Kit ({path}) isn't confirmed yet. It opens every backup of this vault on any machine, so until it is confirmed and its file deleted, a copy of this disk or of its backups opens your secrets, and sealing the key to this {} doesn't protect them: keep a copy off this machine, then confirm it, which deletes the file.",
+                crate::platform::MACHINE
             ),
-            None => "The Recovery Kit isn't confirmed yet: keep a copy off this machine, then confirm it.".into(),
+            None => format!(
+                "The Recovery Kit isn't confirmed yet. It opens every backup of this vault on any machine, so until it is confirmed, sealing the key to this {} doesn't protect the backups: keep a copy off this machine, then confirm it.",
+                crate::platform::MACHINE
+            ),
         };
-        add("recovery_kit_pending", "warning", sentence, Some(vault_cmd("confirm-kit")));
+        add("recovery_kit_pending", STOLEN_DISK_SEVERITY, sentence, Some(vault_cmd("confirm-kit")));
+    }
+
+    if let Some(disk) = &status.disk {
+        let disk = crate::platform::DiskProtection { filevault_on: disk.filevault_on, auto_login_user: disk.auto_login_user.clone() };
+        for (code, sentence) in crate::platform::disk_protection_problems(&disk) {
+            add(code, STOLEN_DISK_SEVERITY, sentence, None);
+        }
     }
 
     let key = &status.key_protection;
-    if key.plain_copy_left {
+    if key.sealed_unusable {
+        add(
+            "key_sealed_unusable",
+            "error",
+            format!(
+                "The vault key sealed to this {} didn't open the vault, so the daemon is running on the plain key file; its log says why.",
+                crate::platform::MACHINE
+            ),
+            Some(install_cmd.clone()),
+        );
+    } else if key.plain_copy_left {
         add(
             "key_plain_copy_left",
             "warning",
-            "The vault key is sealed to the TPM, but a plain copy of it is still on disk (an interrupted seal).".into(),
+            format!(
+                "The vault key is sealed to this {}, but a plain key file is still on disk, and in any backup made while it was there: `vault install` replaces the key and removes it.",
+                crate::platform::MACHINE
+            ),
             Some(install_cmd.clone()),
         );
     } else if key.kind == "file" && key.sealable {
         add(
             "key_not_sealed",
             "warning",
-            "The vault key is a plain file although this machine's TPM could seal it.".into(),
+            if !linux {
+                "The vault key is a plain file although this Mac's Secure Enclave could wrap it.".into()
+            } else {
+                "The vault key is a plain file although this machine's TPM could seal it.".into()
+            },
             Some(install_cmd.clone()),
         );
     }
@@ -527,7 +601,11 @@ pub fn gather_status(paths: &Paths) -> StatusJson {
         protocol: PROTOCOL_VERSION,
         daemon,
         vault,
-        key_protection: keyprotect::state(&paths.dir).into(),
+        key_protection: keyprotect::state(&paths.dir, reply.as_ref().ok().and_then(|r| r.key_source.as_deref())).into(),
+        disk: cfg!(target_os = "macos").then(|| {
+            let disk = crate::platform::disk_protection();
+            DiskJson { filevault_on: disk.filevault_on, auto_login_user: disk.auto_login_user }
+        }),
         recovery_kit,
         backup,
         boot: install::boot_state(paths, uid, owner.as_ref().map(|o| o.name.as_str())),

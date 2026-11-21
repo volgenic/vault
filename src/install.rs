@@ -12,7 +12,10 @@
 //!   program, the files and the daemon stay the owner's, exactly as on a Mac, so the same
 //!   threat model and caller check apply, and `vault install` updates it without sudo. A
 //!   dedicated account is the separate-user design the owner retired in pull request #4.
-//!   The vault key is sealed to the TPM when there is one (`keyprotect::protect`).
+//!
+//! On both, the vault key is sealed to the machine (`keyprotect::protect`): to the Secure Enclave
+//! on a Mac that has one, to the TPM on Linux when there is one. Running `vault install` again
+//! seals a key that is still a plain file.
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
@@ -126,6 +129,9 @@ pub fn install(for_restore: bool, json: bool) -> Result<(), VaultError> {
         }
         let text = serde_json::to_string_pretty(&out).map_err(|_| VaultError::Io("JSON encoding".into()))?;
         println!("{text}");
+    } else if result.is_ok() {
+        // The Recovery Kit, FileVault and automatic login, loudly (#7689).
+        print!("{}", report::stolen_disk_banner(&report::gather_status(&Paths::current()).problems));
     }
     result
 }
@@ -139,6 +145,13 @@ fn install_steps(for_restore: bool, json: bool, out: &mut InstallJson) -> Result
     let owner = OwnerPaths::for_uid(uid)?;
     for dir in [&paths.base, &paths.bin_dir, &paths.dir, &paths.local_backups, &paths.log_dir] {
         ensure_dir(dir)?;
+    }
+    // `vault/` (the vault file, its key, the audit log) stays out of Time Machine (#7689): it can't
+    // be opened on another Mac anyway, and a plain key file (a Mac with no Secure Enclave) would
+    // otherwise go into every backup. The vault's own backups (`vault-backups/`, its mirror) are
+    // what a restore uses, with the recovery key, and stay in.
+    if let Err(why) = crate::platform::exclude_from_backups(&paths.dir) {
+        say!(json, "warning:  {} couldn't be kept out of Time Machine: {why}", paths.dir.display());
     }
     // On Linux the socket's folder under /run/user is systemd's to make (RuntimeDirectory).
     if paths.socket_dir.starts_with(&paths.base) {
@@ -170,12 +183,9 @@ fn install_steps(for_restore: bool, json: bool, out: &mut InstallJson) -> Result
             recovery_fingerprint: None,
             kit_written: None,
         });
-        #[cfg(target_os = "linux")]
-        {
-            let note = reseal_if_possible(&paths);
-            say!(json, "key:      {note}");
-            out.key_note = Some(note);
-        }
+        let note = vault::reseal(&paths);
+        say!(json, "key:      {note}");
+        out.key_note = Some(note);
     } else if for_restore || keyprotect::key_exists(&paths.dir) {
         say!(json, "vault:    none (restore one with `vault restore FILE`)");
         out.vault = Some(InstallVaultJson {
@@ -250,21 +260,6 @@ enum Started {
     /// Not started, and why (the service manager isn't there). Linux only.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     No(String),
-}
-
-/// An existing vault whose key is still the plain file (made before sealing existed, on a
-/// machine that got a TPM, or just restored): seal it now if this machine can. Says how the key
-/// is kept now.
-#[cfg(target_os = "linux")]
-fn reseal_if_possible(paths: &Paths) -> String {
-    let plain = paths.dir.join(keyprotect::KEY_FILE);
-    if fs::symlink_metadata(&plain).is_err() {
-        return keyprotect::describe(&paths.dir);
-    }
-    match keyprotect::load(&paths.dir) {
-        Ok(key) => keyprotect::protect(&paths.dir, &key),
-        Err(error) => format!("can't read the key file to seal it: {error}"),
-    }
 }
 
 /// The LaunchAgent in the owner's login (macOS).
