@@ -235,13 +235,25 @@ fn check_path(path: &str) -> Result<(), VaultError> {
     Ok(())
 }
 
-/// Whether a decoded path segment is `.` or `..`, or looks like one to a server that folds
-/// Unicode (NFKC turns a fullwidth `．` or a one-dot leader `․` into `.`): one or two characters,
-/// each a dot or a dot look-alike. There is no `%25` by now, so one decoding is what any server
-/// sees, however many times it decodes.
+/// Whether a decoded path segment is `.` or `..`, or becomes one for a server that folds Unicode
+/// (NFKC). Every character whose NFKC form is only dots: `.`, fullwidth `．` (U+FF0E), one dot
+/// leader `․` (U+2024) and small `﹒` (U+FE52) fold to one; two dot leader `‥` (U+2025) and the
+/// vertical `︰` (U+FE30) to two. The segment is refused when it is made only of these and folds
+/// to one or two dots. There is no `%25` by now, so one decoding is what any server sees,
+/// however many times it decodes.
 fn is_dot_segment(segment: &str) -> bool {
-    let count = segment.chars().count();
-    (1..=2).contains(&count) && segment.chars().all(|c| matches!(c, '.' | '\u{FF0E}' | '\u{2024}' | '\u{FE52}'))
+    let mut dots = 0usize;
+    for c in segment.chars() {
+        dots += match c {
+            '.' | '\u{FF0E}' | '\u{2024}' | '\u{FE52}' => 1,
+            '\u{2025}' | '\u{FE30}' => 2,
+            _ => return false,
+        };
+        if dots > 2 {
+            return false;
+        }
+    }
+    (1..=2).contains(&dots)
 }
 
 /// `%XX` decoded once; a `%` not followed by two hex digits stays as it is.

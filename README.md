@@ -202,7 +202,7 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   `x-forwarded-*` and `proxy-*` header), `header_not_allowed`; and a path with `%25` (double
   encoding), a `;` path parameter (`..;`), a backslash, an encoded slash, backslash, dot,
   semicolon or NUL, a `%u` escape, escapes that don't decode to valid UTF-8 (overlong forms like
-  `%c0%ae`), or a `.` or `..` segment in any encoding (fullwidth `．` too), `bad_request`. A kind's `stream`
+  `%c0%ae`), or a `.` or `..` segment in any encoding (Unicode that folds to one too, like `．` or `‥`), `bad_request`. A kind's `stream`
   call also refuses the query forms of another credential: `access_token`, `api_key` and
   `oauth_token` for every kind, and for a Google AI login also `key`, `userProject` and
   `quotaUser` (any spelling: `$userProject`, `user_project`, percent-encoded), `rule_mismatch`.
