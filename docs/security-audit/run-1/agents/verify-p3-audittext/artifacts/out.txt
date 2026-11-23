@@ -1,0 +1,7 @@
+on-disk line (JSON escaped): {"t":"2026-11-23T15:56:15Z","event":"fill","name":"x\u001b[1A\u001b[2Kforged\r\n2026-01-01T00:00:00Z  add","outcome":"denied: no_such_login","method":"G\u001b[2K","host":"h\u001b[2K.example","path":"/p\u001b]0;title\u0007","prev":"0000000000000000000000000000000000000000000000000000000000000000"}
+decoded name has ESC byte: true
+decoded name has CR and LF: true
+decoded method has ESC: true
+decoded path has OSC+BEL: true
+show_audit-formatted text (Debug-escaped here): "2026-11-23T15:56:15Z  fill           x\u{1b}[1A\u{1b}[2Kforged\r\n2026-01-01T00:00:00Z  add G\u{1b}[2K https://h\u{1b}[2K.example/p\u{1b}]0;title\u{7}"
+raw ESC bytes in show_audit-formatted text: 5

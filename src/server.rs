@@ -283,8 +283,6 @@ fn reply<T: serde::Serialize>(stream: &mut UnixStream, envelope: &Envelope, valu
     stream.flush()
 }
 
-/// Who sent a request: the peer (R22, R23) and the request's envelope (its protocol version and
-/// request id).
 /// A `stream` request, read.
 struct StreamCall {
     secret: SecretRef,
@@ -296,6 +294,8 @@ struct StreamCall {
     idle: u64,
 }
 
+/// Who sent a request: the peer (R22, R23) and the request's envelope (its protocol version and
+/// request id).
 struct Caller {
     peer: Peer,
     envelope: Envelope,
@@ -834,7 +834,7 @@ impl Server {
                         at: crate::now_rfc3339(),
                         ok,
                         mirror_dir: vault.mirror_dir().to_string(),
-                        newest_file: newest_file.map(|f| f.chars().take(300).collect()),
+                        newest_file: newest_file.map(|f| f.chars().filter(|c| !c.is_control()).take(300).collect()),
                         newest_generation,
                         copied,
                         already_there,

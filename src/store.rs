@@ -276,7 +276,7 @@ pub(crate) fn save(paths: &Paths, key: &SecretValue, doc: &VaultDoc) -> Result<(
         return Err(VaultError::VaultFileCorrupt);
     }
     let magic = magic(VAULT_FORMAT);
-    let plain = Zeroizing::new(serde_json::to_vec(doc).map_err(|_| VaultError::VaultFileCorrupt)?);
+    let plain = crate::secret::to_wiped_json(doc).map_err(|_| VaultError::VaultFileCorrupt)?;
     let mut nonce = [0u8; NONCE_LEN];
     getrandom::getrandom(&mut nonce).map_err(|_| VaultError::Random)?;
     let cipher = XChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| VaultError::KeyProtection)?;
@@ -293,7 +293,7 @@ pub(crate) fn save(paths: &Paths, key: &SecretValue, doc: &VaultDoc) -> Result<(
 }
 
 /// Reads and decrypts the vault file. Any change to the file, including its id or its format
-/// byte, fails here. Reads every format this build knows (1 to 4); an older document comes
+/// byte, fails here. Reads every format this build knows (`model::READABLE_FORMATS`); an older document comes
 /// back as it is, and the caller migrates it (`model::migrate`, `model::ensure_intake`) and writes
 /// it back in the current format.
 /// A file from a newer build is refused with `NewerFormat`, never guessed at.

@@ -1,0 +1,4 @@
+control: renew(seen=1) on unrenamed record -> ok, version 2
+rename: value unchanged, version 1 -> 2
+race: renew(seen=1) after rename -> err version_mismatch (server.rs drops this silently; renewed value not stored)
+health: state_of(v1) = Some(Refused), state_of(v2) = None

@@ -761,7 +761,7 @@ fn status(paths: &Paths) -> Result<(), VaultError> {
                 println!("  last lines of {}:", paths.daemon_log.display());
                 let lines: Vec<&str> = log.lines().collect();
                 for line in &lines[lines.len().saturating_sub(5)..] {
-                    println!("    {line}");
+                    println!("    {}", printable(line));
                 }
             }
             return Ok(());
@@ -846,10 +846,18 @@ fn status(paths: &Paths) -> Result<(), VaultError> {
     if !opened.recent_changes.is_empty() {
         println!("  recent changes:");
         for change in &opened.recent_changes {
-            println!("    {change}");
+            println!("    {}", printable(change));
         }
     }
     Ok(())
+}
+
+/// Text for the terminal with every control character shown as `?`: audit lines and the daemon's
+/// log carry text a socket caller chose (a refused path, a method, a host, a secret name that
+/// isn't in the vault, a program path), which must not move the cursor, recolour the screen or
+/// rewrite the lines above it when the owner reads them.
+fn printable(text: &str) -> String {
+    text.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
 }
 
 fn show_audit(paths: &Paths, all: bool) -> Result<(), VaultError> {
@@ -876,7 +884,7 @@ fn show_audit(paths: &Paths, all: bool) -> Result<(), VaultError> {
         if let Some(program) = &e.peer_program {
             text.push_str(&format!("  [caller pid {} {}]", e.peer_pid.unwrap_or(0), program));
         }
-        println!("{text}");
+        println!("{}", printable(&text));
     }
     let shown = reply.lines.len();
     println!(

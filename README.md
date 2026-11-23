@@ -320,8 +320,9 @@ Neither the host daemon (for an app tab), Volgenic's server nor the agent holds 
 you, so any such program can ask `fill` for a login by naming an origin on its site. That is no
 more than it can already do by reading the vault's key file; the vault keeps passwords out of
 agents' normal path, and every fill is an audit line naming the program that asked. Agents in
-containers can't reach the socket at all. When Volgenic for Mac is signed with a team's Developer
-ID and the hardened runtime, `fill` can require that signature of its caller.
+containers can't reach the socket at all. `fill` doesn't check its caller's code signature yet:
+once Volgenic for Mac is signed with a team's Developer ID and the hardened runtime, `fill` could
+require that signature of its caller.
 
 ## A Google AI login (Antigravity)
 
