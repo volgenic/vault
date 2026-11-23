@@ -220,17 +220,28 @@ fn check_path(path: &str) -> Result<(), VaultError> {
             return bad("no encoded slash, backslash, dot, semicolon or NUL");
         }
     }
-    if path.split('/').any(|segment| is_dot_segment(segment)) {
+    // IIS's `%u002e` is another way to write a dot (or anything else); no API path needs it.
+    if lower.contains("%u") {
+        return bad("no %u escapes (IIS's other encoding, like %u002e for a dot)");
+    }
+    // Overlong UTF-8 (`%c0%ae` is a dot to a lenient decoder) and any other bytes that aren't
+    // UTF-8 once decoded: a legitimate path's escapes always decode to valid UTF-8.
+    let Ok(decoded) = String::from_utf8(percent_decode(path)) else {
+        return bad("its escapes must decode to valid UTF-8 (no overlong forms like %c0%ae)");
+    };
+    if decoded.split('/').any(is_dot_segment) {
         return bad("no . or .. segments, in any encoding");
     }
     Ok(())
 }
 
-/// Whether a path segment is `.` or `..` once percent-decoded (there is no `%25` by now, so one
-/// decoding is what any server sees, however many times it decodes).
+/// Whether a decoded path segment is `.` or `..`, or looks like one to a server that folds
+/// Unicode (NFKC turns a fullwidth `．` or a one-dot leader `․` into `.`): one or two characters,
+/// each a dot or a dot look-alike. There is no `%25` by now, so one decoding is what any server
+/// sees, however many times it decodes.
 fn is_dot_segment(segment: &str) -> bool {
-    let decoded = percent_decode(segment);
-    decoded == b"." || decoded == b".."
+    let count = segment.chars().count();
+    (1..=2).contains(&count) && segment.chars().all(|c| matches!(c, '.' | '\u{FF0E}' | '\u{2024}' | '\u{FE52}'))
 }
 
 /// `%XX` decoded once; a `%` not followed by two hex digits stays as it is.
