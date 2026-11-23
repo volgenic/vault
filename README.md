@@ -195,6 +195,19 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   `{"op":"proxy","name":"openai","host":"api.openai.com","port":443,"method":"GET","path":"/v1/models"}`.
   Redirects come back to you unfollowed. A reply that contains the key is withheld
   (`echo_blocked`).
+- **What `proxy` and `stream` refuse** before anything is sent, so an upstream can't be steered
+  outside the method, path and host the rule (or kind) allows: method, URL and host override
+  headers (`x-http-method-override`, `x-http-method`, `x-method-override`, `x-original-url`,
+  `x-rewrite-url`, `x-original-host` and the rest of `rules::OVERRIDE_HEADERS`, besides every
+  `x-forwarded-*` and `proxy-*` header), `header_not_allowed`; and a path with `%25` (double
+  encoding), a `;` path parameter (`..;`), a backslash, an encoded slash, backslash, dot,
+  semicolon or NUL, a `%u` escape, escapes that don't decode to valid UTF-8 (overlong forms like
+  `%c0%ae`), or a `.` or `..` segment in any encoding (Unicode that folds to one too, like `．` or `‥`), `bad_request`. A kind's `stream`
+  call also refuses the query forms of another credential: `access_token`, `api_key` and
+  `oauth_token` for every kind, and for a Google AI login also `key`, `userProject` and
+  `quotaUser` (any spelling: `$userProject`, `user_project`, percent-encoded), `rule_mismatch`.
+  The refusal names the rule, never a value. A `_method` query or body parameter isn't
+  filtered; refusing it is the upstream's job.
 - **`stream`** is the streaming proxy, for model calls (the host's model proxy sends it). It
   names a secret whose kind (`claude_plan`, `codex_login`, `grok_login`, `google_ai_login`; the table is
   `src/kinds.rs`) or rule (an API key) decides the upstream host, methods and paths, and which
@@ -203,15 +216,18 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   and `chatgpt-account-id`; a Grok login to `cli-chat-proxy.grok.com` under `/v1` with
   `authorization: Bearer <access token>` (your `x-xai-token-auth` and `x-grok-*` headers pass
   through); a Google AI login to `daily-cloudcode-pa.googleapis.com` (or `cloudcode-pa`) at
-  `/v1internal:<method>` with `authorization: Bearer <access token>` (`x-goog-api-key`, `cookie`
-  and `x-goog-user-project` are refused). For a login the vault renews, a call that finds it due renews it first, and a 401
+  `/v1internal:<method>` with `authorization: Bearer <access token>` (`x-goog-api-key`, `cookie`,
+  `x-goog-user-project` and `x-goog-quota-user` are refused, and so are their query forms). For a login the vault renews, a call that finds it due renews it first, and a 401
   from the upstream is held back: the vault renews the login and makes the call once more, so
   you see the second reply only. **A login's 401 never reaches you as a 401** (Codex fails the
   turn on one, Grok retries it four times): when no renewal can fix it, the call ends with one
   error line instead, `credential_refused` (the provider refused the renewal, the login was
   refused already, or a fresh token got a 401 too: sign in again) or `login_awaiting_claim` (an
   imported login the host's daemon hasn't claimed yet, which the vault may not renew). The
-  host's proxy answers either as 503, never 401. The request line is followed by exactly `body_len` raw body bytes (up to 32 MiB):
+  host's proxy answers either as 503, never 401. Only the token server's answer to a renewal
+  marks a login `refused` and stops its renewal; an API's 401 (or Google's Terms of Service 403)
+  answers a request the caller shaped, so `vault health` shows it as `expired` and the vault
+  keeps renewing. A 401 within a minute of a renewal that worked isn't renewed again. The request line is followed by exactly `body_len` raw body bytes (up to 32 MiB):
 
   ```json
   {"op":"stream","name":"main","method":"POST","path":"/v1/messages?beta=true",

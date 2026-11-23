@@ -1208,19 +1208,29 @@ impl Server {
                 held.outcome = "held: auth_error".into();
                 if !renewed_after_401 && self.renewable(record).is_some() {
                     // Nothing reached the caller: renew the login and make the call once more.
-                    held.detail = Some("the upstream answered 401; renewing the login and trying once more".into());
-                    self.audit(held);
+                    let mut renewing = held.clone();
+                    renewing.detail = Some("the upstream answered 401; renewing the login and trying once more".into());
+                    self.audit(renewing);
                     renewed_after_401 = true;
                     match self.renew_login(&id, record.version, "the upstream answered 401", false) {
                         Ok(fresh) => {
-                            doc = fresh;
-                            continue;
+                            // Only a new version is worth another try: with none (renewed under a
+                            // minute ago, or not renewable after all) the token is the one that
+                            // just got the 401.
+                            let renewed = fresh.records.iter().any(|other| other.id == id && other.version != record.version);
+                            if renewed {
+                                doc = fresh;
+                                continue;
+                            }
                         }
                         Err(error) => return refuse(error, event, out),
                     }
                 }
                 // No renewal can help: the login isn't claimed yet (the vault may not renew it),
-                // it was refused already, or a fresh token got a 401 too.
+                // the token server refused it already, or a fresh token got a 401 too. Only the
+                // token server's answer marks the login refused (`renew_login`): this 401 answers a
+                // request the caller shaped, so it is recorded as expired and renewal goes on
+                // (`kinds::upstream_health`; security audit run 1, lead 4).
                 let unclaimed = record.handover.as_ref().is_some_and(|handover| !handover.claimed);
                 held.detail = Some("the upstream answered 401 and no renewal can fix it; answered as an error line, not a 401".into());
                 self.audit(held);
@@ -1228,7 +1238,7 @@ impl Server {
                     self.observe(record, HealthState::Expired, Some(401), None);
                     return refuse(VaultError::LoginAwaitingClaim, event, out);
                 }
-                self.observe(record, HealthState::Refused, Some(401), None);
+                self.observe(record, kinds::upstream_health(record.kind, HealthState::Refused), Some(401), None);
                 return refuse(VaultError::CredentialRefused, event, out);
             }
             event.status = outcome.status;
@@ -1250,7 +1260,7 @@ impl Server {
             ));
             self.audit(event);
             if let Some(state) = outcome.health {
-                self.observe(record, state, outcome.status, outcome.reason);
+                self.observe(record, kinds::upstream_health(record.kind, state), outcome.status, outcome.reason);
             }
             return match (outcome.head_sent, &outcome.error) {
                 (false, Some(error)) if outcome.end != "cancelled" => error_reply(out, peer, error),
@@ -1284,7 +1294,8 @@ impl Server {
     /// before this returns, so before any call uses the new access token. No token is returned
     /// or logged; the audit log names the login only.
     ///
-    /// Back-off: within `RENEW_RETRY` of a failed renewal nothing is sent (an error says so).
+    /// Back-off: within `RENEW_RETRY` of a failed renewal nothing is sent (an error says so), and
+    /// within `RENEW_RETRY` of one that worked, a renewal for a 401 (`early` false) sends nothing.
     /// With `early` (the login is due, not because a call was refused), a login that is not
     /// expired yet and was renewed within its kind's `early_gap_secs` isn't renewed again.
     fn renew_login(&self, id: &str, seen: u64, why: &str, early: bool) -> Result<Arc<VaultDoc>, VaultError> {
@@ -1316,6 +1327,12 @@ impl Server {
                 if early
                     && at.elapsed() < Duration::from_secs(refresher.early_gap_secs)
                     && record.expires_at.is_some_and(|exp| exp > crate::now_unix()) => {
+                return Ok(Arc::clone(&doc));
+            }
+            // A 401 within a minute of a renewal that worked isn't the old token's fault: renewing
+            // again wouldn't help, and a caller who can draw 401s would otherwise rotate the
+            // refresh token once per call (security audit run 1, lead 4).
+            Some((at, true)) if !early && at.elapsed() < RENEW_RETRY => {
                 return Ok(Arc::clone(&doc));
             }
             _ => {}

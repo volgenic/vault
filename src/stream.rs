@@ -77,7 +77,7 @@ pub(crate) fn plan(
     headers: &[(String, String)],
 ) -> Result<UpstreamPlan, VaultError> {
     let (path_only, query) = rules::check_path_and_query(path)?;
-    let path_and_query = match query {
+    let path_and_query = match &query {
         Some(query) => format!("{path_only}?{query}"),
         None => path_only.clone(),
     };
@@ -115,6 +115,7 @@ pub(crate) fn plan(
     if !spec.path_prefixes.iter().any(|prefix| rules::path_within(prefix, &path_only)) {
         return Err(VaultError::RuleMismatch(format!("path {path_only} isn't under {}", spec.path_prefixes.join(", "))));
     }
+    rules::check_query_params(query.as_deref(), spec.refused_query, record.kind.label())?;
     let set_names: Vec<&str> = spec.set_headers.iter().map(|header| header.name).collect();
     let headers = rules::check_caller_headers(&set_names, spec.refused_headers, headers)?;
     let set = spec

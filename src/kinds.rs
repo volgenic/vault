@@ -46,6 +46,8 @@ pub enum HealthState {
     /// Upstream said the credential has expired: the person signs in again.
     Expired,
     /// Upstream refused the credential (revoked, invalid, not allowed): the person signs in again.
+    /// For a login the vault renews, only its token server says this (`upstream_health`), and the
+    /// vault stops renewing that version.
     Refused,
 }
 
@@ -114,6 +116,10 @@ pub struct KindSpec {
     /// More headers a caller may not send, besides `rules::REFUSED_HEADERS` and the ones above:
     /// another way of carrying a credential the upstream would read.
     pub refused_headers: &'static [&'static str],
+    /// Query parameters a caller may not send, as `rules::normalized_param_name` gives them
+    /// (lower-case letters and digits): the query forms of a credential or a billed project the
+    /// upstream would read in place of the vault's header (security audit run 1, lead 3).
+    pub refused_query: &'static [&'static str],
     /// What a reply says about the credential: its status, and the first bytes of its body.
     pub classify: fn(status: u16, body: &[u8]) -> Option<HealthState>,
     /// Why a reply refused the credential, when the kind can say more than its status: a fixed
@@ -145,6 +151,7 @@ pub const CLAUDE_PLAN: KindSpec = KindSpec {
     path_prefixes: &["/v1"],
     set_headers: &[SetHeader { name: "authorization", prefix: "Bearer ", suffix: "", source: HeaderSource::Token }],
     refused_headers: &["x-api-key", "cookie"],
+    refused_query: GENERIC_QUERY_CREDENTIALS,
     classify: classify_anthropic,
     reason: no_reason,
     validate: validate_token,
@@ -169,6 +176,7 @@ pub const CODEX_LOGIN: KindSpec = KindSpec {
         SetHeader { name: "chatgpt-account-id", prefix: "", suffix: "", source: HeaderSource::AccountId },
     ],
     refused_headers: &["x-api-key", "cookie", "openai-organization", "openai-project"],
+    refused_query: GENERIC_QUERY_CREDENTIALS,
     classify: classify_login,
     reason: no_reason,
     validate: crate::logins::validate_codex,
@@ -196,6 +204,7 @@ pub const GROK_LOGIN: KindSpec = KindSpec {
     path_prefixes: &["/v1"],
     set_headers: &[SetHeader { name: "authorization", prefix: "Bearer ", suffix: "", source: HeaderSource::Token }],
     refused_headers: &["x-api-key", "cookie"],
+    refused_query: GENERIC_QUERY_CREDENTIALS,
     classify: classify_login,
     reason: no_reason,
     validate: crate::logins::validate_grok,
@@ -227,7 +236,11 @@ pub const GOOGLE_AI_LOGIN: KindSpec = KindSpec {
     // covers anything under `/v1internal/`.
     path_prefixes: &["/v1internal:", "/v1internal"],
     set_headers: &[SetHeader { name: "authorization", prefix: "Bearer ", suffix: "", source: HeaderSource::Token }],
-    refused_headers: &["x-goog-api-key", "cookie", "x-goog-user-project"],
+    refused_headers: &["x-goog-api-key", "cookie", "x-goog-user-project", "x-goog-quota-user"],
+    // Google's system parameters: an API key (`key`, `api_key`), another OAuth token
+    // (`access_token`, `oauth_token`), a billed project (`userProject`, `$userProject`) and a quota
+    // user (`quotaUser`), in any spelling `rules::normalized_param_name` folds together.
+    refused_query: &["key", "apikey", "accesstoken", "oauthtoken", "userproject", "quotauser"],
     classify: classify_google,
     reason: google_reason,
     validate: crate::logins::validate_google_ai,
@@ -242,6 +255,26 @@ pub const GOOGLE_AI_LOGIN: KindSpec = KindSpec {
         parse: crate::logins::google_ai_renewed,
     }),
 };
+
+/// The query forms of a credential that any OAuth or API-key server may read (RFC 6750's
+/// `access_token`, and `api_key` / `apikey`): refused for every kind, so the vault's header is the
+/// only credential a call carries. Anthropic, ChatGPT's backend and Grok's chat proxy document no
+/// other query credential.
+pub const GENERIC_QUERY_CREDENTIALS: &[&str] = &["accesstoken", "apikey", "oauthtoken"];
+
+/// What the vault records when a kind's upstream API (not its token server) says `state` about
+/// the credential. For a kind the vault renews, only the token server's answer during a renewal
+/// may mark a login `Refused`, which stops its renewal until a new sign-in: an API's 401 or 403 is
+/// a reply to a request the caller shaped (path, body, pass-through headers), so it is recorded
+/// as `Expired`, which leaves renewal running (security audit run 1, lead 4). A kind with no
+/// renewal records what its upstream said.
+pub fn upstream_health(kind: Kind, state: HealthState) -> HealthState {
+    let renewed = spec(kind).is_some_and(|spec| spec.refresher.is_some());
+    match state {
+        HealthState::Refused if renewed => HealthState::Expired,
+        other => other,
+    }
+}
 
 /// Every kind with an entry.
 pub const TABLE: &[&KindSpec] = &[&CLAUDE_PLAN, &CODEX_LOGIN, &GROK_LOGIN, &GOOGLE_AI_LOGIN];
