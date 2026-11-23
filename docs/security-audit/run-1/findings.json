@@ -1,0 +1,559 @@
+[
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "rules.rs/check_caller_headers/method-and-path-override-headers-not-refused",
+    "title": "Proxy forwards caller-chosen method/path override headers, so an upstream that honors them escapes the key's method and path rule",
+    "description": "The proxy binds an API key to its rule's methods and path prefix (README.md:190: the key goes 'only to the rule's host, method and path'). That binding is checked only against the request line: rules::check_against_rule (src/rules.rs:231-243) compares the caller's method and path with the rule. The caller header filter, rules::check_caller_headers (src/rules.rs:258-285), is a denylist of transport and routing headers (REFUSED_HEADERS at src/rules.rs:45-59, plus the x-forwarded- and proxy- prefixes at :275-276). It does not refuse request-rewriting headers such as X-HTTP-Method-Override, X-HTTP-Method, X-Method-Override, X-Original-URL or X-Rewrite-URL. proxy::send (src/proxy.rs:88-94) appends every accepted header to the request it sends to the rule's host with the key in the rule's header. Every agent on the machine can call proxy (src/protocol.rs:3-4). So a request such as POST /v1/public/items/1 with x-http-method-override: DELETE passes a 'GET,POST /v1/public' rule, while a direct DELETE is refused rule_mismatch. The hunter's bounded probe of proxy::check (agents/hunter-proxy/artifacts/out.txt) shows that result, and the source reproduces it deterministically. If the upstream honors such a header, it performs a method or path the owner's rule did not grant, using the owner's key. Google APIs document X-HTTP-Method-Override, Rack::MethodOverride and Symfony/Laravel honor method overrides on POST, and IIS and Symfony honor X-Original-URL and X-Rewrite-URL. A query or body parameter such as _method=DELETE has the same effect through a channel the vault cannot filter generically, so a header denylist narrows the problem but cannot close it alone. The impact exists only when an upstream the owner has a rule for honors an override, and only when that rule is narrower than the key's own scope at the provider.",
+    "claimed_root_cause": "rules::check_caller_headers enforces a denylist (REFUSED_HEADERS plus the x-forwarded-* and proxy-* prefixes) aimed at transport and routing headers. It has no entry for the well-known method-override and URL-rewrite headers. The vault's method and path decision (check_against_rule on the request line) and the upstream's effective method and path can therefore differ.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/protocol.rs",
+        "line": 674,
+        "scope": "parse_request \"proxy\"",
+        "description": "Any same-UID agent's socket request: method, path and the headers object are parsed into Request::Proxy."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/server.rs",
+        "line": 1476,
+        "scope": "Server::proxy",
+        "description": "After check_destination, proxy::check is the only gate before the audited send."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/proxy.rs",
+        "line": 58,
+        "scope": "proxy::check",
+        "description": "check_against_rule compares only the request-line method and path with the rule."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/rules.rs",
+        "line": 272,
+        "scope": "check_caller_headers",
+        "description": "A header name is refused only when it is in REFUSED_HEADERS, is the rule's own header, or starts with x-forwarded- or proxy-. x-http-method-override, x-http-method, x-method-override, x-original-url and x-rewrite-url all pass."
+      },
+      {
+        "kind": "sink",
+        "file": "src/proxy.rs",
+        "line": 105,
+        "scope": "proxy::send",
+        "description": "The accepted override headers, appended at line 93, are sent to the rule's host with the key in the rule's header, which is inserted at line 99."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/rules.rs",
+        "line": 45,
+        "description": "REFUSED_HEADERS lists only transport, routing and auth headers, with no method-override or URL-rewrite header."
+      },
+      {
+        "file": "src/rules.rs",
+        "line": 275,
+        "description": "The prefix refusals cover only x-forwarded- and proxy-."
+      },
+      {
+        "file": "src/rules.rs",
+        "line": 233,
+        "description": "The method binding checks only the request-line method against rule.methods."
+      },
+      {
+        "file": "src/proxy.rs",
+        "line": 93,
+        "description": "Every accepted caller header is appended to the outgoing request."
+      },
+      {
+        "file": "README.md",
+        "line": 190,
+        "description": "The stated control: the key goes only to the rule's host, method and path."
+      },
+      {
+        "file": "src/protocol.rs",
+        "line": 4,
+        "description": "Every agent on the machine can make every socket request, proxy included."
+      }
+    ],
+    "blockers": [
+      "Whether any upstream the owner holds an API-key rule for honors X-HTTP-Method-Override, X-HTTP-Method, X-Method-Override, X-Original-URL or X-Rewrite-URL (or a _method parameter) is a provider fact outside the repository, and no provider may be called in this audit.",
+      "Whether any of the owner's real rules restrict method or path more narrowly than the key's own scope at the provider (for example a GET-only or single-path rule on a key that can also write or delete). Without that, the override gains nothing the rule did not already grant."
+    ],
+    "validation_plan": {
+      "local": "Source alone shows that proxy::check accepts the override headers and refuses the direct method (src/rules.rs:45-59, 272-277; agents/hunter-proxy/artifacts/out.txt). To show the upstream effect without a provider, add a probe binary in the audit wrapper. It starts a loopback HTTPS fixture with a self-signed certificate. The fixture dispatches on X-HTTP-Method-Override when the request line is POST (the Rack/Symfony behavior) and records the effective method and path. The probe builds its own reqwest blocking Client that trusts the fixture's certificate and resolves the rule host to 127.0.0.1 (ClientBuilder::resolve). It then calls proxy::send with a dummy key and a rule such as 'GET,POST https://api.example.test:<port>/v1/public'. Expected result: the fixture records DELETE /v1/public/items/1 while the vault checked POST, and a direct DELETE is refused rule_mismatch before any connection is made. Proposed fix: add x-http-method-override, x-http-method, x-method-override, x-original-url and x-rewrite-url to REFUSED_HEADERS in src/rules.rs, which also covers stream calls that use check_caller_headers. Document in README.md that query and body overrides (_method) are not filtered and remain the upstream's to refuse.",
+      "deployment": "Owner-observed, with no provider calls: run `vault list` and, for each api_key secret, read its rule (methods and path prefix). For each rule whose methods or path are narrower than what the key itself can do at the provider, check the provider's documentation for X-HTTP-Method-Override / X-HTTP-Method / X-Method-Override, X-Original-URL / X-Rewrite-URL, or _method support. Google APIs document X-HTTP-Method-Override. If any rule is both narrower than its key and points at a host that honors an override, this is a real escape of the rule binding for that key."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "rules.rs/check_path/dotdot-semicolon-and-double-encoding-pass-prefix",
+    "title": "Path check allows '..;' segments and double-encoded dots, which some upstream servers normalize outside the rule's path prefix",
+    "description": "An API key's rule binds it to a path prefix, and the README states the key goes 'only to the rule's host, method and path' (README.md:190). check_path refuses literal '.'/'..' segments and the single-encoded forms %2f, %5c, %2e and %00, and path_within then compares the raw path with the prefix on whole segments. A segment such as '..;' or a double-encoded '%252e%252e' passes both checks: '..;' is not equal to '..', and '%252e' contains no '%2e' substring. reqwest's URL parser does not treat either as a dot segment, so the bytes reach the wire unchanged. The hunter's probe (agents/hunter-proxy/artifacts/out.txt, lines 8-9) shows proxy::check accepting GET /v1/public/..;/admin/keys and GET /v1/public/%252e%252e/admin under a rule with prefix /v1/public, with the wire path unchanged. Some upstreams strip path parameters before resolving dot segments, as Tomcat-style servlet containers do with '..;'. Others decode twice. Such an upstream would route these requests to /v1/admin/keys and /v1/admin, outside the granted prefix, with the owner's key. Any caller of the socket can reach this path; the host relays agent requests to it.",
+    "claimed_root_cause": "The rule's path binding is decided on the vault's own literal segment view, while an upstream router may apply a different normalization before matching (path-parameter stripping or a second percent-decode). check_path does not refuse a segment whose part before ';' is '.' or '..', and it does not refuse '%25' followed by an encoded dot, slash or backslash.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/protocol.rs",
+        "line": 674,
+        "scope": "parse_request \"proxy\"",
+        "description": "The caller chooses the proxy request's path string (ProxyWire.path)."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/server.rs",
+        "line": 1476,
+        "scope": "proxy op handler",
+        "description": "The caller's path, unchanged, goes to proxy::check against the key's rule."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/rules.rs",
+        "line": 188,
+        "scope": "check_path",
+        "description": "Only single-encoded %2f, %5c, %2e and %00 are refused; '%252e' has no '%2e' substring and passes."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/rules.rs",
+        "line": 193,
+        "scope": "check_path",
+        "description": "Only segments exactly equal to '.' or '..' are refused; '..;' is a different segment and passes."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/rules.rs",
+        "line": 210,
+        "scope": "path_within",
+        "description": "The raw path /v1/public/..;/admin/keys starts with /v1/public followed by '/', so it counts as under the prefix."
+      },
+      {
+        "kind": "sink",
+        "file": "src/proxy.rs",
+        "line": 101,
+        "scope": "proxy::send",
+        "description": "The request goes to the rule's host with the key header inserted at line 99, and the path is unchanged."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/rules.rs",
+        "line": 188,
+        "description": "The list of refused encodings lacks the double-encoded forms (%25)."
+      },
+      {
+        "file": "src/rules.rs",
+        "line": 193,
+        "description": "Dot segments are refused only on an exact match, so '..;' passes."
+      },
+      {
+        "file": "src/proxy.rs",
+        "line": 79,
+        "description": "The URL is built from the checked path, and Url::parse at line 80 does not treat '..;' or '%252e%252e' as dot segments."
+      },
+      {
+        "file": "README.md",
+        "line": 190,
+        "description": "Stated control: the key goes only to the rule's host, method and path."
+      },
+      {
+        "file": "agents/hunter-proxy/artifacts/out.txt",
+        "line": 8,
+        "description": "Probe: under prefix /v1/public, GET /v1/public/..;/admin/keys is ACCEPTED, and the wire path is unchanged."
+      },
+      {
+        "file": "agents/hunter-proxy/artifacts/out.txt",
+        "line": 9,
+        "description": "Probe: GET /v1/public/%252e%252e/admin is ACCEPTED, and the wire path is unchanged."
+      }
+    ],
+    "blockers": [
+      "It is unknown whether any upstream the owner holds an API-key rule for (with a prefix narrower than '/') normalizes '..;' segments or double-decodes paths before routing and authorizing. That is a provider fact outside the repository, and no provider may be called to find out."
+    ],
+    "validation_plan": {
+      "local": "Run a loopback HTTPS fixture (for example an embedded Tomcat) that strips ';' path parameters before resolving dot segments, plus a second fixture that percent-decodes twice. Build with the test-upstream feature and a rule for 127.0.0.1 with prefix /v1/public, then send GET /v1/public/..;/admin/keys and GET /v1/public/%252e%252e/admin through proxy::send. Record which route the fixture reached (expected: /v1/admin/keys and /v1/admin). Source fix: in check_path, refuse any segment whose part before its first ';' is '.' or '..', and refuse '%25' anywhere in the path (or at least '%25' followed by 2e, 2f or 5c). Apply the same check to stream paths if they are agent-chosen.",
+      "deployment": "Owner-observed and non-destructive: list each API-key rule whose path prefix is narrower than '/' (vault list shows the rules). For each provider, check its public documentation or server headers to see whether its API front end is a Java servlet container or otherwise strips ';' path parameters or double-decodes paths. Send no requests that use the key."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "src/kinds.rs:GOOGLE_AI_LOGIN:query-system-parameters-unrefused",
+    "title": "Google AI login stream: query-string forms of the refused API-key and quota-project headers pass to Cloud Code",
+    "description": "The google_ai_login kind states that another way of naming a credential or a billed project (an API key, a cookie, a quota project) is refused so a call only uses the owner's plan (src/kinds.rs:217-218), and implements that only as the refused caller headers x-goog-api-key, cookie and x-goog-user-project (src/kinds.rs:230). stream::plan splits the caller's path with rules::check_path_and_query, which checks the query only for printable ASCII (src/rules.rs:165-166), matches the kind's path prefixes against the path part alone (src/stream.rs:115, src/rules.rs:207-208), compares only headers with spec.refused_headers (src/stream.rs:119), and rebuilds path?query verbatim (src/stream.rs:80-81). Streamer::request then sends https://<cloudcode host>/v1internal:<method>?<caller query> with the owner's Authorization: Bearer token inserted by the vault (src/stream.rs:439). So a same-UID socket caller can send POST /v1internal:generateContent?key=<key>&userProject=<project> (or $userProject / quotaUser) and the vault forwards those Google system-parameter equivalents of the refused headers with the owner's Google AI token. Source alone shows the stated control is header-only; whether Cloud Code honors the query forms on /v1internal with an OAuth bearer, and what that would bill or attribute, is upstream behavior not visible here. The request body is also forwarded uninspected; that is a separate surface not claimed here.",
+    "claimed_root_cause": "The kind table expresses the 'no other credential or billed project' rule only as a caller-header denylist (KindSpec::refused_headers); stream::plan forwards the caller's query after rules::check_path_and_query, which validates only characters, so query-parameter equivalents of the refused headers (key, userProject/$userProject, quotaUser) are never compared against the kind's policy.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/protocol.rs",
+        "line": 694,
+        "scope": "parse_request stream",
+        "description": "A same-UID socket caller's stream request carries a caller-chosen path, including its query string, into Request::Stream."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/server.rs",
+        "line": 1159,
+        "scope": "Server::stream",
+        "description": "The caller's path and headers are passed to stream::plan for the stored google_ai_login record; only the query-stripped path is logged (line 1140)."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/rules.rs",
+        "line": 165,
+        "scope": "check_path_and_query",
+        "description": "The query is accepted when every byte is printable ASCII; its parameter names and values are not inspected."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/stream.rs",
+        "line": 80,
+        "scope": "plan",
+        "description": "path_and_query is rebuilt as path?query and kept for the upstream request; the prefix check (line 115) uses only the path and the refused list is applied only to headers (line 119)."
+      },
+      {
+        "kind": "sink",
+        "file": "src/stream.rs",
+        "line": 439,
+        "scope": "Streamer::request",
+        "description": "The URL https://<cloudcode host>/v1internal:<method>?key=...&userProject=... is built from plan.path_and_query and sent with the owner's Authorization: Bearer access token set by the vault."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/kinds.rs",
+        "line": 217,
+        "description": "Stated control: another way of naming a credential or a billed project (an API key, a cookie, a quota project) is refused so a call only ever uses the owner's plan."
+      },
+      {
+        "file": "src/kinds.rs",
+        "line": 230,
+        "description": "The control is implemented only as refused header names x-goog-api-key, cookie, x-goog-user-project."
+      },
+      {
+        "file": "src/rules.rs",
+        "line": 166,
+        "description": "The only query check is that every byte is ASCII graphic; no parameter is refused."
+      },
+      {
+        "file": "src/rules.rs",
+        "line": 208,
+        "description": "path_within for the '/v1internal:' prefix is applied to the path part only, so /v1internal:generateContent?key=X is in scope."
+      },
+      {
+        "file": "src/stream.rs",
+        "line": 119,
+        "description": "spec.refused_headers is passed only to rules::check_caller_headers; nothing compares it with the query."
+      }
+    ],
+    "blockers": [
+      "Whether daily-cloudcode-pa.googleapis.com / cloudcode-pa.googleapis.com honor Google's system query parameters key=, userProject= (or $userProject) and quotaUser= on /v1internal calls made with an OAuth bearer token is upstream behavior not visible in this repository.",
+      "Whether the owner's Google account holds serviceusage.services.use on any billed Cloud project such a parameter could name (the financial impact) is account state outside source."
+    ],
+    "validation_plan": {
+      "local": "In the scratch copy, add a temporary pub wrapper in src/stream.rs (scratch only) and a probe bin that builds a dummy google_ai_login Record and calls stream::plan with method POST, path '/v1internal:generateContent?key=AIzaDUMMY&userProject=dummy-project' and no headers; expect Ok with path_and_query containing both parameters. Then call it with path '/v1internal:generateContent' and headers [(\"x-goog-api-key\",\"AIzaDUMMY\")] and separately [(\"x-goog-user-project\",\"dummy-project\")]; expect a header-refused error. No network: plan is pure.",
+      "deployment": "Owner-observed, no-cost, with the owner's approval of the run: in a Google Cloud project the owner controls with no billing attached, open its APIs & Services metrics for the Gemini for Google Cloud / Cloud Code API, make one vault stream call to POST /v1internal:loadCodeAssist with ?userProject=<that project id>, and separately one with ?key=<a restricted test API key from that project>. If the call is attributed to that project in its metrics, or refused with a project/key-specific error (e.g. API not enabled / permission denied on that project), the query form reaches Google's parameter handling and the bypass is real; if both calls behave identically to a call without the parameters and nothing is attributed to the project, the parameters are ignored and the candidate is rejected."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "src/server.rs:stream:caller-induced-401-marks-login-refused",
+    "title": "A stream caller who can make the upstream answer 401 to a valid token gets the login marked Refused, which stops the vault renewing it",
+    "description": "For a login kind (Codex, Grok, Google AI), Streamer::run holds back any 401 on a login call (stream.rs:344) before classification. Server::stream then renews the login with early=false (server.rs:1209-1214), which calls the token server and rotates the refresh token with no early-gap throttle, and retries the same caller-shaped request once. If the retry also gets 401, server.rs:1231 records HealthState::Refused for the renewed version, ignoring whether the body said expired. While that entry stands, renewable() returns None (server.rs:1271), so upkeep (server.rs:1401) and pre-call renewal (server.rs:1165) skip the login, health/status report it refused, and the caller gets credential_refused (sign in again). The caller picks the method, any path under the kind's prefixes, the body, and every header outside the set and refused lists; for Grok the kind table says the caller's own x-xai-token-auth and x-grok-* headers pass through (kinds.rs:189). Recovery is source-visible and limits the impact: stream does not gate the call itself on Refused, and a later 2xx at the same version is classified Works (stream.rs:428, server.rs:1252), which clears Refused (health.rs:56). So the login dies only if no call succeeds at that version before its access token expires, and an attacker who alternates an induced-401 call with a 2xx call forces one refresh-token rotation per cycle. At the socket itself this is no more than same-UID self-impact: any socket caller can delete or rename the login outright (server.rs:733). It matters only if the host relays a container agent's stream path and headers while denying that agent delete and rename, and only if some caller-controlled input makes the real upstream answer 401 to a valid token. Both facts are outside this repository.",
+    "claimed_root_cause": "Server::stream reads any 401 on a caller-shaped request (caller path, body and pass-through headers) after a fresh renewal as proof the login is dead, and writes Refused to the health book (server.rs:1231). Refused then gates renewal by (id, version) in renewable() (server.rs:1271), stays sticky against later non-Works observations (health.rs:55-57), and persists in health.json. The health signal that controls token upkeep comes from replies to requests the caller shaped, not only from the token server's answer.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/server.rs",
+        "line": 1135,
+        "scope": "Server::stream",
+        "description": "A socket caller (or the host relaying an agent's call) asks to stream with a login secret. It chooses the host from the kind's list, the method, the path, the headers and the body."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/stream.rs",
+        "line": 119,
+        "scope": "stream::plan",
+        "description": "Caller headers pass through except the set, the refused, x-forwarded-* and proxy-* ones (rules.rs:258-286). The path may be anything under the kind's prefixes."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/kinds.rs",
+        "line": 189,
+        "scope": "GROK_LOGIN",
+        "description": "Source says the caller's own x-xai-token-auth and x-grok-* headers pass through to cli-chat-proxy.grok.com. Only x-api-key and cookie are refused beyond authorization."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/stream.rs",
+        "line": 344,
+        "scope": "Streamer::run",
+        "description": "With hold_auth_error (always true for a login kind), any 401 status is returned as end=auth_error before the body is read or classified, whatever caused it."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/server.rs",
+        "line": 1214,
+        "scope": "Server::stream 401 branch",
+        "description": "renew_login with early=false: a token-server renewal that rotates the refresh token, throttled only by RENEW_RETRY after a failed renewal. Then the same plan and body are retried once."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/server.rs",
+        "line": 1231,
+        "scope": "Server::stream 401 branch",
+        "description": "A second 401 records HealthState::Refused for the renewed version and answers credential_refused."
+      },
+      {
+        "kind": "sink",
+        "file": "src/server.rs",
+        "line": 1271,
+        "scope": "Server::renewable",
+        "description": "Refused at the current version makes renewable() return None, so upkeep (server.rs:1401) and pre-call renewal (server.rs:1165) stop renewing the login until a Works observation or a new version."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/server.rs",
+        "line": 1209,
+        "description": "The renew-and-retry runs for any held 401 when the login is renewable. Nothing checks whether the 401 is about the token or about the caller's request."
+      },
+      {
+        "file": "src/server.rs",
+        "line": 1231,
+        "description": "self.observe(record, HealthState::Refused, Some(401), None) after the retry's 401. The body is never read, so an 'expired' 401 is also recorded as Refused."
+      },
+      {
+        "file": "src/health.rs",
+        "line": 55,
+        "description": "A Refused entry stays for its version until a Works reply. Expired cannot clear it."
+      },
+      {
+        "file": "src/health.rs",
+        "line": 5,
+        "description": "The book is written to health.json and survives a daemon restart."
+      },
+      {
+        "file": "src/server.rs",
+        "line": 1315,
+        "description": "The early-gap throttle applies only when early is true. The 401 path passes false, so each induced-401 cycle costs one refresh-token rotation."
+      },
+      {
+        "file": "src/stream.rs",
+        "line": 428,
+        "description": "Recovery: a non-held reply is classified, and a 2xx is Works. server.rs:1252 records it, which clears Refused at that version (health.rs:56). Stream itself does not refuse a Refused login, so an ordinary successful call heals the state while the access token is valid."
+      },
+      {
+        "file": "src/server.rs",
+        "line": 733,
+        "description": "Calibration: delete (and rename at server.rs:736) have no gate beyond the peer-UID check. A socket-level caller can already remove the login, so the candidate has impact only through a host relay that permits stream but not delete or rename."
+      },
+      {
+        "file": "src/kinds.rs",
+        "line": 281,
+        "description": "classify_login also maps a plain 401 to Refused. For login kinds this arm is not reached on the stream path, because the 401 is held at stream.rs:344 first. It shows the same design reading of 401 as a dead credential."
+      }
+    ],
+    "blockers": [
+      "Whether any caller-controllable input in scope makes the real upstream answer 401 while the bearer token is valid. In scope are a path under /backend-api/codex, /backend-api/wham/usage, /v1 or /v1internal, a pass-through header such as Grok's x-xai-token-auth or x-grok-*, or a body. This is upstream behavior, and finding out needs a live provider call, which this audit forbids.",
+      "Whether volgenic/host relays a container agent's stream path and headers to the vault unchanged while denying that agent the delete and rename ops. If any principal that can reach stream can also call delete or rename (server.rs:733-740), the impact is no more than same-UID self-impact under the accepted design (protocol.rs:3-4)."
+    ],
+    "validation_plan": {
+      "local": "In a scratch copy built with feature test-upstream, point the Grok kind at a loopback fixture. The fixture answers 401 only when the request carries x-xai-token-auth and 200 otherwise, and a loopback token-server fixture always renews. Send one stream call with that header. Expect two upstream requests and one renewal; health.json and health then show refused at version N+1, and upkeep skips the login. Send one call without the header: expect a 2xx, and health shows works at N+1, which confirms the self-healing path. Repeat the pair and count one token-server call per cycle.",
+      "deployment": "Owner check, no paid call. In volgenic/host, read the stream relay for container agents: list which caller headers and paths it forwards, and whether those agents can reach delete or rename. If they can, close the candidate as self-impact. If they cannot, use provider documentation or a scout (no live request) to check whether cli-chat-proxy.grok.com, chatgpt.com/backend-api/codex or cloudcode-pa answer 401 to a malformed client header, path or body when the token is valid."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "vault:main.rs:show_audit:raw-audit-text-to-terminal",
+    "title": "Caller-supplied names, methods, paths and hosts reach the owner's terminal raw in `vault audit` and `vault status`",
+    "description": "The daemon copies caller-supplied text into audit events without removing control characters. This covers unknown secret names (event.name via SecretRef::label, which protocol::secret_ref never validates), the proxy and stream method (truncated to 16 chars) and path (200 chars, copied before rules::check_path), a refused host (253 chars) and RuleMismatch detail, which repeats the full method. `vault audit` (show_audit) prints these fields with plain `{}`. So does the recent-changes list in `vault status`, which includes denied delete and rename events because is_change does not look at the outcome. A local probe of the library showed that ESC, CR, LF and OSC/BEL bytes are kept as JSON escapes on disk, come back as raw bytes after read_all and the JSON reply round trip, and survive into the show_audit format string. On a terminal they could erase or overwrite earlier audit lines, forge audit-looking lines or send OSC commands, while the CLI still prints 'hash chain intact'. Sibling fields (fill notes, mirror-report detail, lease job, sign recipient, request_id) do strip control characters, so the filter is applied unevenly. Direct socket callers are same-UID, which is an accepted trade-off, so the case needs a cross-boundary relayed producer. volgenic/core's vault relay sanitizes proxy, delete and rename fields. volgenic/host's browser engine passes an agent's `account` unfiltered into `fill`, so whether some relay upstream of it filters `account` decides whether this is reachable.",
+    "claimed_root_cause": "Audit events store caller-controlled strings verbatim (src/server.rs:391, 949, 1142-1145, 1426-1429, 1434, 1455; names unvalidated at src/protocol.rs:647 and src/model.rs:326). show_audit and status print the decoded audit fields with plain Display and do not escape control characters (src/main.rs:863-879, 849; src/vault.rs:1211), unlike the filtered sibling fields (src/fill.rs:75, src/server.rs:832, 902, 1056).",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/server.rs",
+        "line": 690,
+        "scope": "Server::dispatch Request::Fill",
+        "description": "A fill request carries a caller-chosen secret name (relayed from the host browser engine's `account`) and origin. Only engine, tab and on_behalf_of pass through fill::note."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/protocol.rs",
+        "line": 647,
+        "scope": "secret_ref",
+        "description": "A name becomes SecretRef::Name with no validation (only an id is checked)"
+      },
+      {
+        "kind": "propagation",
+        "file": "src/server.rs",
+        "line": 949,
+        "scope": "Server::fill error branch",
+        "description": "On a fill denial (for example no_such_login) the raw SecretRef label, with any characters including ESC, CR and LF, becomes event.name"
+      },
+      {
+        "kind": "propagation",
+        "file": "src/server.rs",
+        "line": 1428,
+        "scope": "Server::proxy",
+        "description": "Same root cause for proxy: the raw method (16 chars) and raw path (200 chars, before check_path) are copied into the event. A refused host is copied raw at line 1455, and RuleMismatch detail at line 1434"
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 155,
+        "scope": "append_line",
+        "description": "The event is serialized as JSON and appended to the chain. Control characters are kept as JSON escapes (probe: \\u001b, \\r\\n and \\u0007 on disk)"
+      },
+      {
+        "kind": "propagation",
+        "file": "src/server.rs",
+        "line": 340,
+        "scope": "Server::audit_report",
+        "description": "Audit lines are read back and returned to the CLI as AuditReply. Once decoded, the control characters are raw again (probe: ESC, CR/LF and BEL present after read_all and a JSON round trip)"
+      },
+      {
+        "kind": "sink",
+        "file": "src/main.rs",
+        "line": 879,
+        "scope": "show_audit",
+        "description": "name, method, host, path, detail and peer_program are formatted with {} and printed raw to the owner's terminal (probe: 5 raw ESC bytes in the show_audit-formatted line)"
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/main.rs",
+        "line": 863,
+        "description": "The event name is padded and printed with {:<22}, with no escaping"
+      },
+      {
+        "file": "src/main.rs",
+        "line": 865,
+        "description": "method, host and path are concatenated raw into the printed line"
+      },
+      {
+        "file": "src/main.rs",
+        "line": 849,
+        "description": "vault status prints recent changes (built at src/vault.rs:1211 from event and raw name) raw. Denied delete and rename count as changes because is_change (src/audit.rs:90) ignores the outcome"
+      },
+      {
+        "file": "src/model.rs",
+        "line": 326,
+        "description": "SecretRef::label returns the caller's name unvalidated"
+      },
+      {
+        "file": "src/server.rs",
+        "line": 1455,
+        "description": "A refused caller host is logged raw, up to 253 characters"
+      },
+      {
+        "file": "src/rules.rs",
+        "line": 234,
+        "description": "RuleMismatch detail repeats the full, untruncated method. It is stored as event.detail at src/server.rs:1434 (stream: src/stream.rs:113, stored at src/server.rs:1150)"
+      },
+      {
+        "file": "src/fill.rs",
+        "line": 75,
+        "description": "Sibling control: fill notes strip control characters. The same filter is applied at src/server.rs:832, 902 and 1056, but not to these fields"
+      },
+      {
+        "file": "agents/verify-p3-audittext/artifacts/out.txt",
+        "line": 1,
+        "description": "Local library probe (dummy data, hygiene wrapper; pending parent promotion). The on-disk line holds JSON escapes, and after read_all plus a JSON round trip the decoded name, method and path again contain ESC, CR/LF and OSC/BEL bytes. The show_audit-formatted line carries 5 raw ESC bytes"
+      }
+    ],
+    "blockers": [
+      "No in-repo cross-boundary producer is established. Whether any relay in front of volgenic/host fleet/browser/engine.mjs:1149 (which passes String(args.account) unfiltered to the vault's fill name) rejects control characters in `account` is outside this repository. A read-only grep of volgenic/core lib found no browser sign-in relay to inspect, so the agent-to-host path for `account` was not located",
+      "The core vault relay (volgenic/core lib/volgenic/core/host/vault_ops.ex, per the hunter's read-only check) sanitizes the proxy, delete and rename name, method, path and host, so no other relayed producer of these fields was identified. Direct socket callers are same-UID, which is accepted",
+      "The CLI output path was not exercised end to end against a daemon, because running `vault daemon` is outside the execution boundary. Only the library append, read_all, JSON round trip and show_audit format were reproduced, under a hygiene wrapper with no OS sandbox, and the out.txt artifact depends on parent-side promotion"
+    ],
+    "validation_plan": {
+      "local": "Done here (agents/verify-p3-audittext/artifacts/out.txt). A scratch probe built an AuditEvent with name \"x\\u001b[1A\\u001b[2Kforged\\r\\n...\", method \"G\\u001b[2K\", host \"h\\u001b[2K.example\" and path \"/p\\u001b]0;title\\u0007\". It appended the event with vault::audit::append to a scratch log, read it back with vault::audit::read_all, round-tripped it through serde_json and formatted it as show_audit does: the raw ESC, CR/LF and BEL bytes survive. Regression case for the fix: show_audit, the status recent-changes builder and every audit field printer escape non-printable characters (for example with char::escape_debug or a shared printable() filter), or the daemon filters them where it builds the AuditEvent and in with_peer. The same fixture must then print as visible escapes.",
+      "deployment": "Owner-observed and non-destructive. From a container agent, call the browser sign-in tool with `account` set to a dummy string such as \"nosuch\\u001b[2K\\rFAKE LINE\" against any page with a login form, so the vault refuses it with no_such_login. Then run `vault audit | cat -v` on the host and check whether the fill-denied line shows ^[ escape bytes (reachable) or whether the request was refused upstream with a validation error (not reachable). Also confirm which service relays the agent's browser tool call to the host engine, and whether it validates `account`."
+    }
+  },
+  {
+    "verdict": "rejected",
+    "fingerprint": "vault:main.rs:wallet_caps:name-resolved-twice",
+    "title": "`vault wallet-caps` shows one wallet but sends its recovery-key-authorized caps by name, so a rename in the prompt window redirects them",
+    "description": "The mechanism is real in source: wallet_caps (src/main.rs:617-633) finds the wallet by name from a separate `list`, shows its current and new caps, waits for the recovery key, then sends SecretRef::Name(name) with no id, version, chain or address. set_wallet_caps (src/vault.rs:642-670) reloads and re-resolves by name, and caps.validate (src/wallet.rs:284-299) only rejects fee caps of another chain family, so a rename swap between two same-family wallets during the prompt would make the owner's authorization set the other wallet's caps. But no lower-trust principal can perform the swap. The socket's `rename` (src/server.rs:736-740) is reachable only by same-UID processes (src/protocol.rs:3-4), and those can already read or unseal the vault key (src/keyprotect/mod.rs:1-19) and rewrite any wallet's caps in the vault file that every change reload()s (src/vault.rs:276-279), which is the accepted trade-off. The one remote path, volgenic/core's relay, allows `rename` only to the person themselves: vault_rename is in the :manage set that requires a person session with no device (core extensions/vault/lib/volgenic/extensions/vault/access.ex:15-27), and rename_mcp_server needs connections.write, which only a session holds, and renames only `mcp.<name>` keys of the person's own MCP servers (core extensions/connections/lib/volgenic/extensions/connections/mcp_servers.ex:14-37, lib/volgenic/core/host/mcp_servers.ex:129-137). Agents and API tokens cannot rename through the relay. So the race only lets the owner, or a same-UID process that already has more power, redirect the owner's own authorization. That crosses no boundary.",
+    "claimed_root_cause": "The CLI binds the recovery-key authorization to a mutable name rather than the record it displayed (src/main.rs:619, 627), and set_wallet_caps re-resolves by name with no expected id, version or chain (src/vault.rs:652-657), while rename is available to any socket caller without the recovery key.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/main.rs",
+        "line": 618,
+        "scope": "wallet_caps",
+        "description": "First connection: `list`, then the wallet is found by name and its chain and current caps are read (line 619-621)"
+      },
+      {
+        "kind": "propagation",
+        "file": "src/main.rs",
+        "line": 626,
+        "scope": "wallet_caps",
+        "description": "The owner is shown the current and new caps and pastes the recovery key (a human-time window)"
+      },
+      {
+        "kind": "propagation",
+        "file": "src/vault.rs",
+        "line": 1100,
+        "scope": "Vault::rename",
+        "description": "A rename by name needs no recovery key, but the socket serving it (src/server.rs:736) admits only same-UID callers, and core relays it only for the person's own session"
+      },
+      {
+        "kind": "propagation",
+        "file": "src/main.rs",
+        "line": 627,
+        "scope": "wallet_caps",
+        "description": "Second connection sends SecretRef::Name(name), the caps and the recovery key, with no id, version or chain"
+      },
+      {
+        "kind": "sink",
+        "file": "src/vault.rs",
+        "line": 661,
+        "scope": "Vault::set_wallet_caps",
+        "description": "After reload and the recovery-key check, the record now holding the name gets the new caps"
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/main.rs",
+        "line": 619,
+        "description": "The displayed wallet is found by name; its id is in the summary but not sent"
+      },
+      {
+        "file": "src/main.rs",
+        "line": 627,
+        "description": "wallet-caps is sent with SecretRef::Name only"
+      },
+      {
+        "file": "src/vault.rs",
+        "line": 653,
+        "description": "set_wallet_caps re-resolves by name with no expected id, version or chain"
+      },
+      {
+        "file": "src/wallet.rs",
+        "line": 299,
+        "description": "caps.validate rejects only fee caps of another chain family, so a swap between two EVM wallets passes"
+      },
+      {
+        "file": "src/server.rs",
+        "line": 738,
+        "description": "rename is served to every socket caller without the recovery key"
+      },
+      {
+        "file": "src/protocol.rs",
+        "line": 3,
+        "description": "The socket admits only the owner's UID; every same-UID agent is treated as the owner"
+      },
+      {
+        "file": "src/keyprotect/mod.rs",
+        "line": 17,
+        "description": "Anything running as the owner can read or unseal the vault key, so a same-UID caller can rewrite caps without the race"
+      },
+      {
+        "file": "src/vault.rs",
+        "line": 277,
+        "description": "Every change starts from the vault file on disk, so caps written by a key holder are what the daemon uses"
+      }
+    ],
+    "reason": "Source refutes the decisive reachability premise. The hunter's open blocker was whether a relayed, non-same-UID principal can call `rename`. The read-only mirror of volgenic/core answers it: Volgenic.Extensions.Vault.Access puts vault_rename in @manage and refuses it unless the caller is a person with no device id (access.ex:15-27, 'no API token or agent grant names that scope'), and the only other relayed rename, McpServers.rename via rename_mcp_server, needs connections.write, which only a person's session holds (connections/mcp_servers.ex:14-37), and touches only `mcp.<name>` keys of the person's own servers. Every remaining rename caller is a same-UID local process, and per the accepted trade-off (src/protocol.rs:3-4, src/keyprotect/mod.rs:1-19) such a process can already read the vault key and rewrite any wallet's caps directly in the file that set_wallet_caps reloads (src/vault.rs:276-279). The race gives no attacker anything it lacks, so it crosses no boundary; the comparable per-socket rule ('Same-UID self-impact is not a finding unless a stated control is defeated') applies. The name-then-name pattern is a robustness gap at most, and the CLI does print the changed wallet's name, address and caps afterwards (src/main.rs:629-630), with an audit line naming the record id. Hardening, optional and not a finding: send SecretRef::Id(secret.id) and the expected version from wallet_caps, and refuse on a mismatch in set_wallet_caps. No local execution was run because the mechanism is undisputed and the verdict rests on reachability, which source decides."
+  }
+]

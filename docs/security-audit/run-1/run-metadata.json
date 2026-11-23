@@ -1,0 +1,88 @@
+{
+  "run_id": "vault-run-1",
+  "repo": "volgenic/vault",
+  "target": "/agent/work",
+  "source_ref": {
+    "commit": "9b36136c24f521883f3bc2d2bbbe9773e76b35a7",
+    "dirty": false
+  },
+  "profile": "standard",
+  "scope_paths": [
+    "src/",
+    "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "scripts/release.sh",
+    "docs/"
+  ],
+  "budget": {
+    "max_agent_invocations": 32,
+    "wave_limit": 2,
+    "rationale": "volgenic.md scales ~100 runs per 150k lines; target is ~14.6k lines of Rust, raised to 30 because it is the most security-critical repository",
+    "plan": {
+      "recon": 4,
+      "hunters_wave1": 9,
+      "critics": 2,
+      "verifier_reserve": 15
+    },
+    "revisions": [
+      {
+        "at": "2026-11-23T15:54:00Z",
+        "from": 30,
+        "to": 32,
+        "reason": "Wave 2 returned 3 new candidates. Phase 3 for them (3 runs) plus Phase 5 for the 5 needs_validation records (5 runs; the rejected record needs none) made 8 runs, with 7 remaining. The parent set this budget (the user set none), so it is raised by 2 in the open rather than leaving a record unverified. The final-clean critic is not run, because hunting stopped on the wave limit (volgenic.md stop rule 3)."
+      }
+    ]
+  },
+  "execution_policy": "sandboxed-source-and-local-only",
+  "sandbox_deviations": [
+    "no network or mount namespace (unshare refused)",
+    "the agent GitHub token is readable by any target process",
+    "writes not confined to scratch by the OS",
+    "target counted as the owner's own code (volgenic/vault)"
+  ],
+  "companion_files": [
+    "DESKTOP-MOBILE-AND-LOCAL-IPC.md",
+    "MEMORY-SAFETY-AND-BINARY.md",
+    "PROTOCOLS-RPC-AND-MESSAGING.md",
+    "WEB-PROTOCOL-AND-AUTH.md",
+    "DATA-ISOLATION-AND-LIFECYCLE.md",
+    "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md",
+    "SUPPLY-CHAIN-AND-RELEASE.md"
+  ],
+  "prior_runs": [],
+  "shared_file_owners": {
+    "run-metadata.json": "parent",
+    "architecture.md": "parent",
+    "coverage-ledger.json": "parent",
+    "findings.json": "parent",
+    "REPORT.md": "parent",
+    "FINDINGS-DETAIL.md": "parent",
+    "NEEDS-VALIDATION.md": "parent"
+  },
+  "run_status": "incomplete",
+  "phase_times": {
+    "setup_start": "2026-11-23T15:30:21Z",
+    "recon_start": "2026-11-23T15:30:36Z",
+    "hunting_start": "2026-11-23T15:35:52Z",
+    "wave2_start": "2026-11-23T15:47:51Z",
+    "hunting_end": "2026-11-23T15:54:00Z",
+    "validation_start": "2026-11-23T15:42:53Z",
+    "phase5_start": "2026-11-23T15:57:30Z",
+    "phase6_start": "2026-11-23T15:59:00Z",
+    "end": "2026-11-23T16:08:00Z"
+  },
+  "agents_spent": 31,
+  "hunting_stop": {
+    "rule": 3,
+    "reason": "wave_limit_reached",
+    "note": "The wave limit (2) was reached; no wave-2 post-wave critic or final-clean critic ran, so the report makes no clean-coverage claim."
+  },
+  "incomplete_reason": "wave_limit_reached",
+  "verdict_counts": {
+    "confirmed": 0,
+    "needs_validation": 5,
+    "rejected": 1
+  },
+  "fixes_in_same_pull_request": "The work item asked for low-risk exposure fixes in the same pull request (H-01, H-02, H-03 and docs M-01), as separate commits; see REPORT.md section 6."
+}

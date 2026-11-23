@@ -1,0 +1,17 @@
+== cargo build --release --locked --offline
+build_exit=0
+size 8787328
+== absolute path strings in release binary (count)
+305
+== sample
+     45 /home/node/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.54.1
+     36 /home/node/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ring-0.17.14
+     29 /home/node/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rustls-0.23.46
+     16 /home/node/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clap_builder-4.6.7
+     13 /home/node/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.12.28
+     11 /home/node/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hyper-1.12.0
+     10 /home/node/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hyper-util-0.1.21
+      8 /home/node/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/http-1.5.0
+== any /home/node/security-audit-skill/vault/run-1/agents/hunter-supply/scratch/home scratch path
+0
+EXIT=1

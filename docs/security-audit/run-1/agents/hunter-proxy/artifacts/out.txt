@@ -1,0 +1,14 @@
+rule: GET,POST https://api.example.com/v1/public  (and below), key in header `authorization: Bearer {key}`
+ACCEPTED POST /v1/public/items/1 headers=[("x-http-method-override", "DELETE")] -> wire path "/v1/public/items/1" query None host Some("api.example.com")
+ACCEPTED POST /v1/public/items/1 headers=[("x-http-method", "DELETE")] -> wire path "/v1/public/items/1" query None host Some("api.example.com")
+ACCEPTED POST /v1/public/items/1 headers=[("x-method-override", "DELETE")] -> wire path "/v1/public/items/1" query None host Some("api.example.com")
+ACCEPTED GET /v1/public headers=[("x-original-url", "/v1/admin/keys")] -> wire path "/v1/public" query None host Some("api.example.com")
+ACCEPTED GET /v1/public headers=[("x-rewrite-url", "/v1/admin/keys")] -> wire path "/v1/public" query None host Some("api.example.com")
+ACCEPTED POST /v1/public/items/1?_method=DELETE headers=[] -> wire path "/v1/public/items/1" query Some("_method=DELETE") host Some("api.example.com")
+ACCEPTED GET /v1/public/..;/admin/keys headers=[] -> wire path "/v1/public/..;/admin/keys" query None host Some("api.example.com")
+ACCEPTED GET /v1/public/%252e%252e/admin headers=[] -> wire path "/v1/public/%252e%252e/admin" query None host Some("api.example.com")
+ACCEPTED GET /v1/public/x headers=[("range", "bytes=10-20")] -> wire path "/v1/public/x" query None host Some("api.example.com")
+REFUSED  DELETE /v1/public/items/1 headers=[] -> rule_mismatch
+REFUSED  GET /v1/public/../admin headers=[] -> bad_request
+REFUSED  GET /v1/public headers=[("x-forwarded-host", "evil.example")] -> header_not_allowed
+check_destination(None,None) = true
