@@ -18,7 +18,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use zeroize::Zeroizing;
 
 use crate::backup;
 use crate::error::VaultError;
@@ -127,8 +126,7 @@ fn call_secret<T: DeserializeOwned>(
 ) -> Result<T, VaultError> {
     let request_id = new_request_id();
     let outgoing = Outgoing { request, protocol: protocol::PROTOCOL_VERSION, request_id: &request_id };
-    let mut bytes = Zeroizing::new(Vec::with_capacity(128 * 1024));
-    serde_json::to_writer(&mut *bytes, &outgoing).map_err(|_| VaultError::Io("request encoding".into()))?;
+    let bytes = crate::secret::to_wiped_json(&outgoing).map_err(|_| VaultError::Io("request encoding".into()))?;
     parse(&exchange(paths, &bytes, payload, wait)?, &request_id)
 }
 

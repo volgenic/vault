@@ -161,9 +161,7 @@ pub(crate) fn write_and_verify(doc: &VaultDoc, dir: &Path) -> Result<BackupStatu
         audit_head: &doc.audit_head,
         records: &doc.records,
     };
-    let plain = Zeroizing::new(
-        serde_json::to_vec(&payload).map_err(|_| VaultError::BackupFailed("encoding".into()))?,
-    );
+    let plain = crate::secret::to_wiped_json(&payload).map_err(|_| VaultError::BackupFailed("encoding".into()))?;
 
     let recovery = age::x25519::Recipient::from_str(&doc.recovery_recipient)
         .map_err(|_| VaultError::BackupFailed("the recovery public key is malformed".into()))?;
@@ -226,7 +224,7 @@ pub(crate) fn open(path: &Path, identity: &dyn age::Identity) -> Result<BackupPa
     open_bytes(&data, identity)
 }
 
-/// Decrypts and parses a backup held in memory, in any format this build reads (1 to 4). A
+/// Decrypts and parses a backup held in memory, in any format this build reads (`model::READABLE_FORMATS`). A
 /// format-1 backup's records have no ids yet; `vault::restore` gives them ids
 /// (`model::migrate_records`).
 pub(crate) fn open_bytes(data: &[u8], identity: &dyn age::Identity) -> Result<BackupPayload, VaultError> {

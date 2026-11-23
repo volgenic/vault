@@ -1,0 +1,2463 @@
+[
+  {
+    "coverage_id": "Cargo.lock::Cargo.toml::Cargo.toml::SUPPLY-CHAIN-AND-RELEASE.md%23Dependency%20and%20build-input%20attack%20classes",
+    "canonical_refs": {
+      "surface": "Cargo.lock",
+      "boundary": "Cargo.toml",
+      "subsystem": "Cargo.toml",
+      "attack_class": "SUPPLY-CHAIN-AND-RELEASE.md#Dependency and build-input attack classes"
+    },
+    "surface": "locked dependencies and build script",
+    "boundary": "--locked builds, crates.io checksums",
+    "subsystem": "Cargo.toml",
+    "attack_class": "Dependency and build-input attack classes",
+    "starting_paths": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "build.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Obvious things",
+    "selected_companion_blocks": [
+      "SUPPLY-CHAIN-AND-RELEASE.md#Core discipline",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Dependency and build-input attack classes",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Universal moves",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "SUPPLY-CHAIN-AND-RELEASE.md#CI and automation attack classes",
+        "reason": "no CI in the repository by owner decision"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-supply",
+    "reviewed_paths": [
+      ".gitignore",
+      "Cargo.lock",
+      "Cargo.toml",
+      "build.rs",
+      "scripts/release.sh",
+      "src/lib.rs",
+      "src/logins.rs",
+      "src/stream.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-supply",
+        "reviewed_paths": [
+          "Cargo.toml",
+          "Cargo.lock"
+        ],
+        "invariant": "Every dependency resolves from one fixed source with a lockfile checksum, with no alternate registry, git or path source, [patch]/[replace] override, or in-repo .cargo/config.toml that could redirect resolution",
+        "method": "source",
+        "result": "Cargo.lock (format 4) holds 297 packages; all 296 non-root packages have source registry+https://github.com/rust-lang/crates.io-index and a checksum line. Cargo.toml has no [patch], [replace], git or path dependency; git ls-files shows no .cargo/config.toml, rust-toolchain file or vendored sources. No namespace-confusion path exists (publish = false, single crates.io source).",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-supply",
+        "reviewed_paths": [
+          "scripts/release.sh",
+          "Cargo.lock",
+          "Cargo.toml"
+        ],
+        "invariant": "Release builds consume exactly the committed lockfile (--locked) and the lockfile is consistent with Cargo.toml",
+        "method": "local",
+        "result": "release.sh builds every target with --locked (cargo build --release --locked at line 56, cargo zigbuild --release --locked at line 63). A scratch copy built with cargo build --release --locked --offline succeeded (binary 8787328 bytes), so the committed lock satisfies Cargo.toml without re-resolution. The same build also showed 305 absolute /home/node/.cargo/registry/src/... strings (the builder's CARGO_HOME) embedded in the release binary and none of the checkout path (see hardening).",
+        "artifact": "agents/hunter-supply/artifacts/out.txt"
+      },
+      {
+        "agent_id": "hunter-supply",
+        "reviewed_paths": [
+          "build.rs",
+          "src/lib.rs"
+        ],
+        "invariant": "The build script runs no mutable, downloaded or attacker-influenced input into the shipped binary",
+        "method": "source",
+        "result": "build.rs runs only `git rev-parse --short=12 HEAD` and `git status --porcelain --untracked-files=no` with fixed arguments, and emits VAULT_TARGET and VAULT_GIT_COMMIT as rustc env; no network, codegen or file inclusion. src has no include_str!/include_bytes!; env! uses only CARGO_PKG_VERSION and these two values (src/lib.rs:49-59). No generated-source or vendored-blob path exists.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-supply",
+        "reviewed_paths": [
+          "Cargo.toml",
+          "src/stream.rs"
+        ],
+        "invariant": "The test-upstream debug mode (redirects kinds' hosts to 127.0.0.1 and trusts an extra CA) cannot be enabled in a release by environment variable",
+        "method": "source",
+        "result": "test-upstream is a Cargo feature, default off; the env-reading function exists only under #[cfg(feature = \"test-upstream\")] (src/stream.rs:530-531) and the non-feature build compiles a no-op (src/stream.rs:522-523). release.sh passes no --features. VAULT_TEST_UPSTREAM_PORT and VAULT_TEST_CA have no effect on a release binary.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-supply",
+        "reviewed_paths": [
+          "Cargo.lock",
+          "src/logins.rs",
+          ".gitignore"
+        ],
+        "invariant": "Obvious things: no checked-in credentials or secret files, no security TODOs, no known-vulnerable pinned versions",
+        "method": "source",
+        "result": "git ls-files lists no .env, .pem, .key or credentials files; .gitignore covers /target/ and /dist/. No security TODO/FIXME/HACK. The only embedded secret-shaped value is GOOGLE_CLIENT_SECRET (src/logins.rs:87), a third-party installed-app (public) OAuth client secret Google documents as non-confidential; it grants nothing without a user's refresh token. Pinned versions are past the advisories known to this reviewer that touch them (age 0.11.5 past the 0.11.1 plugin-name fix, ring 0.17.14 past RUSTSEC-2025-0009, url 2.5.8/idna 1.1.0 past RUSTSEC-2024-0421, curve25519-dalek 4.1.3 past RUSTSEC-2024-0344, slab 0.4.12 past RUSTSEC-2025-0047). No offline RustSec database or cargo-audit is in the container, so advisories newer than the reviewer's knowledge were not checked; a vulnerable version alone would not be a finding without a reachable boundary.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-supply",
+    "hardening_notes": [
+      "Release binaries embed the builder's absolute CARGO_HOME in panic-location strings: a local cargo build --release --locked held 305 strings like /home/node/.cargo/registry/src/index.crates.io-.../tokio-1.54.1/... (agents/hunter-supply/artifacts/out.txt). A release built on the owner's machine would carry e.g. /Users/<account>/.cargo/..., which undercuts release.sh:74-75's stated aim that the archive 'names no local account'. Low impact (an account name). Fix: in release.sh, export RUSTFLAGS=\"--remap-path-prefix=$HOME=~\" (or CARGO_HOME), or set [profile.release] trim-paths once stable.",
+      "scripts/release.sh --add (lines 105-120) does not check that HEAD equals the release's target commit, and with TARGETS unset on a Mac (line 40) it rebuilds the Linux archives with zigbuild and uploads them with --clobber over the published ones. A volgenic/host pin made from the first SHA256SUMS would then refuse the new bytes (fails closed, so the cost is availability). Fix: require TARGETS (or default to aarch64-apple-darwin) in --add mode, and compare git rev-parse HEAD with the release's targetCommitish before building.",
+      "scripts/release.sh --publish (line 101): if tag v$VERSION already exists, gh release create attaches to the existing tag and ignores --target, so the notes' 'commit $COMMIT' and the binaries could differ from the tag's commit. Fix: fail when git ls-remote --tags finds the tag, or when the tag's commit differs from HEAD.",
+      "scripts/release.sh line 90 hashes every dist/vault-$VERSION-*.tar.gz, including stale archives from earlier runs this run did not build or upload, so SHA256SUMS can list assets that do not exist on the release. Fix: hash only ${BUILT[@]}.",
+      "The release's clean-tree check (release.sh:31) and build.rs's dirty flag use --untracked-files=no, so an untracked build input such as a .cargo/config.toml in the checkout (rustflags, linker, source replacement) is not flagged; the toolchain (no rust-toolchain.toml), cargo-zigbuild and zig are unpinned. Same-principal only. Consider pinning the toolchain and refusing untracked files under .cargo/.",
+      "Manual installs (README.md:94-98, docs/releasing.md 'Installing from a release') check SHA256SUMS from the same GitHub release, with no signature, and the snippet's lines are not chained with &&, so pasting them continues to tar and install after a failed check. Consider signing SHA256SUMS (minisign or cosign) and chaining the install steps; the host's automated path already has an independent pin."
+    ]
+  },
+  {
+    "coverage_id": "scripts%2Frelease.sh::docs%2Freleasing.md::scripts%2Frelease.sh::SUPPLY-CHAIN-AND-RELEASE.md%23Release%20and%20update%20attack%20classes",
+    "canonical_refs": {
+      "surface": "scripts/release.sh",
+      "boundary": "docs/releasing.md",
+      "subsystem": "scripts/release.sh",
+      "attack_class": "SUPPLY-CHAIN-AND-RELEASE.md#Release and update attack classes"
+    },
+    "surface": "release archives and install/update of the binary",
+    "boundary": "SHA256SUMS on the release; install copies current_exe",
+    "subsystem": "scripts/release.sh",
+    "attack_class": "Release and update attack classes",
+    "starting_paths": [
+      "scripts/release.sh",
+      "docs/releasing.md",
+      "src/install.rs",
+      "Cargo.toml"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Chained vulnerabilities and trust boundaries",
+    "selected_companion_blocks": [
+      "SUPPLY-CHAIN-AND-RELEASE.md#Core discipline",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Release and update attack classes",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Universal moves",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "SUPPLY-CHAIN-AND-RELEASE.md#CI and automation attack classes",
+        "reason": "no CI in the repository by owner decision"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-supply",
+    "reviewed_paths": [
+      "Cargo.toml",
+      "README.md",
+      "docs/releasing.md",
+      "scripts/release.sh",
+      "src/install.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-supply",
+        "reviewed_paths": [
+          "scripts/release.sh",
+          "docs/releasing.md"
+        ],
+        "invariant": "Build-to-promotion: the archives and SHA256SUMS published are the ones this run built, from a committed tree",
+        "method": "source",
+        "result": "release.sh refuses tracked-file changes (line 31), builds with --locked, stages only the binary plus README.md and LICENSE (lines 67-72), hashes dist archives (line 90) and uploads only this run's BUILT archives (lines 101-102, 119). No lower-trust writer exists between build and upload: the whole pipeline runs on the releaser's machine with their gh login, and there is no CI by owner decision. The weak spots (--add does not check HEAD against the release's commit, an existing tag makes gh ignore --target, a Mac --add without TARGETS rebuilds and clobbers the Linux assets, stale dist archives can appear in SHA256SUMS) are same-principal consistency issues, listed as hardening.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-supply",
+        "reviewed_paths": [
+          "docs/releasing.md",
+          "README.md"
+        ],
+        "invariant": "Update consumers verify archive integrity against a root independent of the download location, and fail closed",
+        "method": "source",
+        "result": "No signing: SHA256SUMS sits on the same GitHub release, so the manual path (docs/releasing.md, README.md:94-96) only protects against transfer errors; this is the architecture's accepted 'no signing' trade-off. sha256sum -c --ignore-missing fails closed when the archive is unlisted (GNU coreutils 9.1 printed 'no file was verified', exit 1, dummy files). The automated consumer is volgenic/host (read-only, outside this repo): fleet/vault/pin.json pins each target's sha256 inside the signed host bundle, and fleet/vault/release.mjs deletes and refuses a mismatching download or cache before unpacking or running it. Its docs say it never downgrades a newer installed program. So the release a host installs has an independent trust root (the host release key).",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-supply",
+        "reviewed_paths": [
+          "src/install.rs"
+        ],
+        "invariant": "vault install replaces the program atomically and copies only the running binary",
+        "method": "source",
+        "result": "install_program (src/install.rs:78-98) copies current_exe().canonicalize() into bin/.vault.new with create_new and mode 0700, fsyncs and renames it over the program, so the update is atomic. It refuses root (lines 134-137) and stops the daemon first (line 152). vault install has no version or rollback check of its own; downgrade refusal is the host's (pin.json, release.mjs). A manual downgrade is a same-UID action. Privileged-helper and local-file aspects of install.rs belong to the peer unit.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-supply",
+        "reviewed_paths": [
+          "Cargo.toml",
+          "scripts/release.sh"
+        ],
+        "invariant": "Release authorization: only the intended identity can publish, and the release names its real version and commit",
+        "method": "source",
+        "result": "VERSION comes from the first column-0 version line of Cargo.toml (line 26); TAG is v$VERSION; publishing uses the releaser's own gh credentials on volgenic/vault (lines 101, 108, 119). GitHub's repository-level release permissions are the only authorization, which is outside source; no plugin or extension trust surface exists. No in-repo control is defeated.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-supply",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Faudit.rs%23append::src%2Faudit.rs%23check::src%2Faudit.rs::ATTACK-CLASSES.md%23Business%20logic",
+    "canonical_refs": {
+      "surface": "src/audit.rs#append",
+      "boundary": "src/audit.rs#check",
+      "subsystem": "src/audit.rs",
+      "attack_class": "ATTACK-CLASSES.md#Business logic"
+    },
+    "surface": "audit log append, rotation and check",
+    "boundary": "SHA-256 hash chain with head recorded in the vault file (R28, R29)",
+    "subsystem": "src/audit.rs",
+    "attack_class": "Business logic",
+    "starting_paths": [
+      "src/audit.rs",
+      "src/vault.rs",
+      "src/server.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [],
+    "excluded_blocks": [],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-store",
+    "reviewed_paths": [
+      "src/audit.rs",
+      "src/server.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-store",
+        "reviewed_paths": [
+          "src/audit.rs"
+        ],
+        "invariant": "append serializes writers, chains each line to the hash of the previous line across rotation, never overwrites a rotated file, and flushes before a use (R28)",
+        "method": "source",
+        "result": "append_line holds an flock on a separate lock file for the read-last-line, rotate and write sequence. Rotation refuses an existing target name and opens the new log with create_new. prev continues from rotated_head when the new log is empty. The text hashed is exactly the serialized line, and serde_json escapes newlines in caller fields. Server::record maps an append failure to AuditUnavailable, so the use is refused.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-store",
+        "reviewed_paths": [
+          "src/audit.rs",
+          "src/vault.rs",
+          "src/server.rs"
+        ],
+        "invariant": "check proves the chain from genesis through every rotated file and requires the head recorded in the authenticated vault file to appear in it (R29); an edited, deleted or reordered line before that head is reported",
+        "method": "source",
+        "result": "walk verifies line.prev == the running head for every line from GENESIS and rejects non-UTF-8 or unparseable lines. Rotated files checked earlier are pinned by dev, inode, length, mtime and ctime stamps, and a mismatch triggers a full check. full_check returns AuditHeadMissing unless the recorded head is found, and holds() accepts GENESIS only as the recorded value, which only a key holder can write. commit appends the line before saving the head. A full check runs at daemon start and on `audit --all`. The remaining gaps are hardening against a same-UID writer who could rewrite the vault file with the readable key anyway: lines after the last change can be truncated, and the incremental check does not re-read the already-checked prefix of the current audit.log.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-store",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Finstall.rs%23install::src%2Finstall.rs%23install_program::src%2Finstall.rs::DESKTOP-MOBILE-AND-LOCAL-IPC.md%23Privileged-helper%20and%20local-file%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/install.rs#install",
+      "boundary": "src/install.rs#install_program",
+      "subsystem": "src/install.rs",
+      "attack_class": "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Privileged-helper and local-file attack classes"
+    },
+    "surface": "vault install, update and service files",
+    "boundary": "owner-only folders and files, fixed tool paths, program copy",
+    "subsystem": "src/install.rs",
+    "attack_class": "Privileged-helper and local-file attack classes",
+    "starting_paths": [
+      "src/install.rs",
+      "src/store.rs",
+      "src/keyprotect/mod.rs",
+      "src/main.rs",
+      "src/mirror.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Resource and file handling",
+    "selected_companion_blocks": [
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Core discipline",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Privileged-helper and local-file attack classes",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Application-state and device-lifecycle attack classes",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Universal moves",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Webview and native-bridge attack classes",
+        "reason": "no webview in this crate"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-ipc",
+    "reviewed_paths": [
+      "src/install.rs",
+      "src/keyprotect/mod.rs",
+      "src/main.rs",
+      "src/mirror.rs",
+      "src/store.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-ipc",
+        "reviewed_paths": [
+          "src/install.rs",
+          "src/main.rs",
+          "src/store.rs"
+        ],
+        "invariant": "vault install is not a privileged helper: it refuses root, runs as the owner, and writes only below paths derived from the owner's passwd home, so no lower-trust caller can select its files, service or commands.",
+        "method": "source",
+        "result": "install_steps refuses uid or euid 0 (src/install.rs:134-137); Paths::current derives every path from getpwuid, never $HOME (src/store.rs:80-85). No sudo, polkit or setuid path exists: loginctl and systemctl are called with --no-ask-password and null stdin (src/install.rs:50-66, 435-449). Subcommands are dispatched from argv by the owner (src/main.rs:228-256). A same-UID process could already do all of this itself, so there is no confused-deputy gain.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-ipc",
+        "reviewed_paths": [
+          "src/install.rs",
+          "src/keyprotect/mod.rs"
+        ],
+        "invariant": "External tools run at fixed absolute paths (never $PATH) with fixed arguments, and service file values are escaped so a path cannot inject unit or plist directives.",
+        "method": "source",
+        "result": "SYSTEMCTL and LOGINCTL are /usr/bin constants (src/install.rs:356-357), launchctl is /bin/launchctl (src/install.rs:282, 293), systemd-creds is /usr/bin or /bin only (src/keyprotect/mod.rs:192-194). The unit's ExecStart is double-quoted with % doubled and backslash and quote escaped (src/install.rs:380-386, 399, 415); the plist values are XML-escaped (src/install.rs:316-318, 339-340). The only interpolated values are passwd-derived home paths, which no other OS user controls. user_env only sets XDG_RUNTIME_DIR when unset (src/install.rs:361-366).",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-ipc",
+        "reviewed_paths": [
+          "src/install.rs",
+          "src/store.rs",
+          "src/keyprotect/mod.rs",
+          "src/vault.rs",
+          "src/mirror.rs"
+        ],
+        "invariant": "The installed program, vault key, Recovery Kit, vault file and mirror copies are created owner-only with exclusive or atomic creation, so no other OS user can read them or redirect the write.",
+        "method": "source",
+        "result": "install_program writes bin/.vault.new with create_new mode 0700 and renames into the 0700 bin folder (src/install.rs:78-98). ensure_dir chmods each base folder 0700 (src/install.rs:68-74). The key is create_new 0600 (src/keyprotect/mod.rs:91-104) and loaded only if lstat shows a 0600 regular file of the user (src/keyprotect/mod.rs:107-113); the sealed temp is chmod 0600 inside the 0700 vault folder (src/keyprotect/mod.rs:290). The kit is create_new 0600, which refuses an existing file or symlink (src/vault.rs:199-210). write_atomic uses create_new 0600 temp plus rename (src/store.rs:339-361); mirror copies use it (src/mirror.rs:25-42). Service files are 0644, which exposes only the program path. No lower-trust reader of a credential file was found.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-ipc",
+        "reviewed_paths": [
+          "src/install.rs"
+        ],
+        "invariant": "An update replaces the program only from bytes the owner chose to run and keeps the existing vault (no repair state or manifest read from a lower-trust location).",
+        "method": "source",
+        "result": "The source is current_exe().canonicalize() (src/install.rs:153), read and written through a fresh exclusive temp (src/install.rs:88-96). There is no download, manifest or repair state. An existing vault file is kept (src/install.rs:164-178), and vault::init refuses when a vault or key exists. Re-reading the executable by path after it started is a hardening note only: replacing it needs write access to the folder the owner ran it from, which another OS user lacks for the usual locations (an owner-owned file in sticky /tmp, or the owner's own folders).",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-ipc",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Fmain.rs%23show_audit::src%2Fserver.rs%23with_peer::src%2Fmain.rs::ATTACK-CLASSES.md%23Injection",
+    "canonical_refs": {
+      "surface": "src/main.rs#show_audit",
+      "boundary": "src/server.rs#with_peer",
+      "subsystem": "src/main.rs",
+      "attack_class": "ATTACK-CLASSES.md#Injection"
+    },
+    "surface": "src/main.rs#show_audit and status display of daemon-relayed text",
+    "boundary": "caller-supplied method, path, host and peer program copied into audit lines and mirror state, rendered raw to the owner's terminal",
+    "subsystem": "src/main.rs",
+    "attack_class": "Injection",
+    "starting_paths": [
+      "src/main.rs",
+      "src/server.rs",
+      "src/audit.rs",
+      "src/platform.rs",
+      "src/report.rs",
+      "src/fill.rs",
+      "src/mirror.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Injection",
+    "selected_companion_blocks": [
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Core discipline",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Framing, schema, and interpretation attack classes",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Universal moves",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Local IPC and exported-component attack classes",
+        "reason": "the socket peer check is owned by the existing IPC unit; this unit is the CLI's rendering of stored reply text"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 2,
+    "status": "candidate",
+    "agent_id": "hunter2-cli",
+    "reviewed_paths": [
+      "src/audit.rs",
+      "src/error.rs",
+      "src/fill.rs",
+      "src/main.rs",
+      "src/model.rs",
+      "src/platform.rs",
+      "src/rules.rs",
+      "src/server.rs",
+      "src/stream.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter2-cli",
+        "reviewed_paths": [
+          "src/main.rs",
+          "src/audit.rs",
+          "src/vault.rs"
+        ],
+        "invariant": "Text the CLI prints from audit lines (`vault audit`) and from status recent changes (`vault status`) cannot carry terminal control characters supplied by a socket caller",
+        "method": "source",
+        "result": "show_audit (src/main.rs:863-879) formats e.name, e.method, e.host, e.path, e.outcome, e.detail and e.peer_program with plain `{}` into println!; status prints recent_changes (src/main.rs:846-849) built in src/vault.rs:1210-1211 from l.event.name with plain formatting. No escaping or control-character filter exists between the decoded JSON audit line and the terminal. serde_json decodes \\u001b, \\r, \\n into the real characters.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-cli",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/model.rs",
+          "src/rules.rs",
+          "src/stream.rs",
+          "src/error.rs"
+        ],
+        "invariant": "Caller-supplied method, path, host and secret name are validated or sanitized before being copied into audit events",
+        "method": "source",
+        "result": "Not enforced. proxy (src/server.rs:1424-1429) and stream (src/server.rs:1140-1145) copy the raw method (16 chars) and raw path (200 chars, before rules::check_path runs) into the event; a refused host is copied raw up to 253 chars (src/server.rs:1455); RuleMismatch detail carries the full untruncated method (src/rules.rs:234, src/stream.rs:113) and is stored as event.detail (src/server.rs:1433-1434). Unknown names reach event.name raw through SecretRef::label (src/model.rs:324-327) in finish (src/server.rs:391), proxy/stream (src/server.rs:1426, 1142) and fill denials (src/server.rs:949). A denied delete/rename is an is_change event (src/audit.rs:90-95), so its raw name also lands in `vault status` recent changes. Error Display for UnknownSecret/NoSuchLogin uses {:?} (escaped), so detail strings of those errors are safe; event.name is not.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-cli",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/fill.rs",
+          "src/platform.rs"
+        ],
+        "invariant": "Sibling audit fields apply an equivalent control-character filter",
+        "method": "source",
+        "result": "Inequivalent: fill notes (src/fill.rs:75), mirror-report detail (src/server.rs:832), lease job (src/server.rs:902) and sign recipient (src/server.rs:1056) strip control characters, and stored names/sites/apps/usernames are validated (src/model.rs:462-501), but method, path, host, unknown names and peer_program (readlink of /proc/<pid>/exe, src/platform.rs:104-105, copied in with_peer src/server.rs:306) are not. Direct socket callers are same-UID (accepted trade-off), so the cross-boundary producer is a relayed caller.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-cli",
+        "reviewed_paths": [
+          "src/server.rs"
+        ],
+        "invariant": "A relayed (non-same-UID) producer can reach the unsanitized fields",
+        "method": "source",
+        "result": "Read-only check of sibling repositories (outside this repo, not proof): volgenic/core lib/volgenic/core/host/vault_ops.ex sanitizes proxy name (no control chars), method (enum), path (printable ASCII) and host (URI.new), so the core vault relay for proxy/delete/rename is blocked. volgenic/host fleet/browser/engine.mjs:1149 passes String(args.account) unfiltered into the vault `fill` name (fleet/daemon_browser.mjs:205), and the fill-denied path stores it raw in event.name. Whether core's browser relay filters `account` was not established.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "vault:main.rs:show_audit:raw-audit-text-to-terminal"
+    ],
+    "unresolved": [],
+    "planned_hunter": "hunter2-cli",
+    "critic_reason": "No unit names the command-line tool's display as a surface. The existing checks (protocol unit, stream unit) only established that audit lines are JSON-encoded on disk. But src/server.rs:1140-1145 and src/server.rs:1424-1429 copy the caller's method (16 chars, unfiltered) and path (200 chars, recorded before check_path runs, so a refused request keeps any control bytes) into the audit event. src/server.rs:1452-1455 copies a caller-named host (253 chars) on a destination refusal. src/server.rs:306 with src/platform.rs:104-106 copies the /proc exe path. src/server.rs:837 stores mirror-report newest_file with no control filter (detail is filtered at :832). src/main.rs:861-878 then println!s e.path, e.method, e.host, e.detail and peer_program with no escaping. ESC, CR or LF in a relayed agent's request could reach the owner's terminal and forge or hide `vault audit` lines. A hunter should trace every audit and status field to its CLI print and check its filtering.",
+    "hardening_notes": [
+      "src/main.rs list/health/restore print names, sites, apps and usernames with plain {}; these are validated on store (src/model.rs:462-501) so they are safe today, but escaping at the CLI renderer would make every display path independent of daemon-side validation.",
+      "src/main.rs delete confirms by name only and sends SecretRef::Name; delete is open to every caller without the recovery key, so a rename swap grants nothing new, but sending the listed id would make the prompt bind to what it names.",
+      "status prints mirror.at and mirror.detail from the mirror report; detail is control-filtered (src/server.rs:832) and the CLI already labels it as reportable by any program running as the owner."
+    ],
+    "validation_decisions": {
+      "vault:main.rs:show_audit:raw-audit-text-to-terminal": "needs_validation"
+    }
+  },
+  {
+    "coverage_id": "src%2Fmain.rs%23wallet%20caps%20delete%20reset%20prompts::src%2Fvault.rs%23set_wallet_caps::src%2Fmain.rs::DESKTOP-MOBILE-AND-LOCAL-IPC.md%23Application-state%20and%20device-lifecycle%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/main.rs#wallet caps delete reset prompts",
+      "boundary": "src/vault.rs#set_wallet_caps",
+      "subsystem": "src/main.rs",
+      "attack_class": "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Application-state and device-lifecycle attack classes"
+    },
+    "surface": "src/main.rs#wallet_caps, delete and reset confirmation flows",
+    "boundary": "src/vault.rs#set_wallet_caps recovery-key check bound to the wallet the owner was shown",
+    "subsystem": "src/main.rs",
+    "attack_class": "Application-state and device-lifecycle attack classes",
+    "starting_paths": [
+      "src/main.rs",
+      "src/client.rs",
+      "src/vault.rs",
+      "src/server.rs",
+      "src/protocol.rs",
+      "src/wallet.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Core discipline",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Application-state and device-lifecycle attack classes",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Universal moves",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Webview and native-bridge attack classes",
+        "reason": "no webview in this crate"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 2,
+    "status": "candidate",
+    "agent_id": "hunter2-cli",
+    "reviewed_paths": [
+      "src/client.rs",
+      "src/main.rs",
+      "src/server.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter2-cli",
+        "reviewed_paths": [
+          "src/main.rs",
+          "src/client.rs",
+          "src/vault.rs",
+          "src/server.rs"
+        ],
+        "invariant": "The recovery-key-authorized caps change applies to the wallet whose address, chain and current caps the owner was shown",
+        "method": "source",
+        "result": "Not bound. wallet_caps (src/main.rs:617-633) resolves the name with a separate `list` call (line 618-621), shows chain and caps of that record, waits for the owner to paste the recovery key, then sends SecretRef::Name(name) (line 627) with no id, version, chain or address. set_wallet_caps (src/vault.rs:648-661) reloads and re-resolves by name on a later connection, and the rename op (src/server.rs:736-740, src/vault.rs:1091-1103) is open to any socket caller without the recovery key. A rename swap in the window redirects the owner's authorization to another same-family wallet; caps.validate (src/wallet.rs:284-299) only rejects a different chain family. The CLI had secret.id available but sent the name.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-cli",
+        "reviewed_paths": [
+          "src/main.rs",
+          "src/vault.rs"
+        ],
+        "invariant": "delete and reset confirmations cannot be redirected to an action the caller could not otherwise perform",
+        "method": "source",
+        "result": "delete (src/main.rs:635-644) is confirmed by name only, but delete needs no recovery key and is open to every socket caller, so a swap grants nothing new. reset (src/main.rs:971-1005) re-checks on the daemon side (backup opens with the recovery key and matches the vault) and targets the whole vault, not a selectable resource. No boundary crossed.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-cli",
+        "reviewed_paths": [
+          "src/vault.rs"
+        ],
+        "invariant": "For a same-UID local agent the caps swap gives more than the accepted trade-off",
+        "method": "source",
+        "result": "It does not: every change calls reload() (src/vault.rs:276-279), which reads the vault file with the key that any same-UID process can read or unseal (accepted trade-off), so a same-UID agent can already rewrite caps without the recovery key. The race only matters for a relayed caller who can rename but cannot read the key; that reachability is outside this repository.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "vault:main.rs:wallet_caps:name-resolved-twice"
+    ],
+    "unresolved": [],
+    "planned_hunter": "hunter2-cli",
+    "critic_reason": "The install unit selected the Application-state block (Pending-action and user-presence confusion), but none of its checks addresses it, and no unit binds a CLI confirmation to the resource it acts on. src/main.rs:617-627 lists the wallet and shows its current and new caps. It then waits on a hidden recovery-key prompt and sends wallet_caps by SecretRef::Name, without the id or version it displayed. src/vault.rs:1091-1113 lets any same-UID caller rename a wallet: delete refuses wallets at src/vault.rs:1076, but rename does not. The agents the caps restrain could therefore swap names during the prompt, so the owner's recovery-key authorization lands on another wallet of the same chain. src/main.rs:635-640 (delete) and src/main.rs:971-996 (reset) have the same shape.",
+    "hardening_notes": [],
+    "validation_decisions": {
+      "vault:main.rs:wallet_caps:name-resolved-twice": "rejected"
+    }
+  },
+  {
+    "coverage_id": "src%2Fmirror.rs%23mirror_once::src%2Fbackup.rs%23prune::src%2Fmirror.rs::ATTACK-CLASSES.md%23Resource%20and%20file%20handling",
+    "canonical_refs": {
+      "surface": "src/mirror.rs#mirror_once",
+      "boundary": "src/backup.rs#prune",
+      "subsystem": "src/mirror.rs",
+      "attack_class": "ATTACK-CLASSES.md#Resource and file handling"
+    },
+    "surface": "src/mirror.rs#mirror_once (mirror and local backup folder listings)",
+    "boundary": "src/backup.rs#prune and latest (file-name-only selection)",
+    "subsystem": "src/mirror.rs",
+    "attack_class": "Resource and file handling",
+    "starting_paths": [
+      "src/mirror.rs",
+      "src/backup.rs",
+      "src/server.rs",
+      "src/vault.rs",
+      "src/store.rs",
+      "src/install.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Resource and file handling",
+    "selected_companion_blocks": [
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Export, backup, restore, and migration attack classes",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Core discipline",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Privileged-helper and local-file attack classes",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Universal moves",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DATA-ISOLATION-AND-LIFECYCLE.md#Tenant and object-isolation attack classes",
+        "reason": "single tenant"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 2,
+    "status": "covered",
+    "agent_id": "hunter2-mirror",
+    "reviewed_paths": [
+      "src/backup.rs",
+      "src/main.rs",
+      "src/mirror.rs",
+      "src/model.rs",
+      "src/server.rs",
+      "src/store.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter2-mirror",
+        "reviewed_paths": [
+          "src/mirror.rs",
+          "src/backup.rs",
+          "src/store.rs"
+        ],
+        "invariant": "mirror_once writes only inside the mirror folder and never through a planted path: target names come from read_dir file names of the local folder, filtered to vault-backup-*.age",
+        "method": "source",
+        "result": "Target is mirror.join(source.file_name()) (src/mirror.rs:48-49), a single read_dir component that cannot contain '/' or '..'. write_atomic_mode creates the temp with create_new (O_EXCL, no symlink follow) and renames over the leaf, replacing a planted symlink rather than writing through it (src/store.rs:339-361). Temp names start with '.', so list/list_all never pick up the daemon's or the mirror's in-flight files (src/backup.rs:290,313). No traversal or write-through-symlink path.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-mirror",
+        "reviewed_paths": [
+          "src/mirror.rs",
+          "src/backup.rs",
+          "src/store.rs",
+          "src/vault.rs"
+        ],
+        "invariant": "Only the vault owner can influence what the mirror reads (local folder) or where it writes (mirror_dir); no lower-trust principal selects either",
+        "method": "source",
+        "result": "local_dir is the daemon's fixed Paths.local_backups under the owner's home derived from the account database (src/store.rs:80-128); mirror_dir is set only at init and restore from OwnerPaths::default_mirror_dir or the 0600 restore-point.json in the vault folder (src/vault.rs:114-160, 1316-1325); no socket op sets it. The local folder is created by the daemon in the owner's 0700/0755-owned tree, so only the same UID can plant files or symlinks there, which the architecture's accepted trade-off places out of scope. The mirror refuses to run as root (src/mirror.rs:62-64), so it is not a privileged confused deputy.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-mirror",
+        "reviewed_paths": [
+          "src/backup.rs",
+          "src/vault.rs"
+        ],
+        "invariant": "prune deletes only this vault's files and only regular-file entries, never following symlinks or crossing vaults",
+        "method": "source",
+        "result": "prune selects by the 8-hex vault-id prefix plus '.age' suffix and calls fs::remove_file, which unlinks a symlink rather than its target and fails silently on directories (src/backup.rs:280-297, 343-350). Other vaults' files (e.g. the pre-restore vault, new id at src/vault.rs:1336) are copied by list_all but never pruned, so no cross-vault deletion. Deletion of a secret leaving it in earlier generations is source-stated (src/vault.rs:1068, R18).",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-mirror",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/model.rs",
+          "src/main.rs",
+          "src/mirror.rs"
+        ],
+        "invariant": "The mirror report is not used as proof of backup integrity by any decision path",
+        "method": "source",
+        "result": "MirrorReport is only stored to mirror.json and shown by status with the stated caveat 'any program running as you could send one' (src/server.rs:832-855, src/model.rs:445-447, src/main.rs:837). latest() on the mirror feeds only that display; reset/verify-backup/read-backup use latest() on the daemon's own local folder (src/backup.rs:259-277, src/vault.rs:1148). A spoofed or name-misled report changes no security decision.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-mirror",
+        "reviewed_paths": [
+          "src/mirror.rs",
+          "src/backup.rs"
+        ],
+        "invariant": "Copy integrity and TOCTOU: a copy is checked byte for byte after writing",
+        "method": "source",
+        "result": "copy_and_check hashes the source, writes atomically, re-reads and compares SHA-256 (src/mirror.rs:25-42). A concurrent daemon prune between list and read yields an error report, not a wrong copy. Files are ciphertext age-encrypted to the recovery and check keys (src/backup.rs:168-186), so reading the 0644 local copies or the 0600 mirror copies discloses no secret.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter2-mirror",
+    "critic_reason": "The backup unit checked only that the mirror holds ciphertext and is written with write_atomic. No unit treated the synced mirror folder (iCloud Drive by default, src/mirror.rs:2-3) as input that another writer controls. src/mirror.rs:44-58 copies into it, prunes it and reports its latest file using names alone. src/backup.rs:285-300 and :343-350 select and delete by name prefix and lexicographic sort. src/backup.rs:124 and :184 zero-pad the generation to 6 digits only, so a generation past 999999 or a planted 'vault-backup-<id>-999999-*.age' changes which real backups prune deletes (KEEP_GENERATIONS 50, local folder too via src/backup.rs:193). It also changes the newest_file and newest_generation the status reports. src/mirror.rs:27 hashes an existing target through whatever it points to. A hunter should check planted names, symlinks and generation overflow in both folders.",
+    "hardening_notes": [
+      "Backup selection is lexical on the file name: generations are formatted {:06} (src/backup.rs:124, 184) and list() sorts PathBufs bytewise (src/backup.rs:295). Past generation 999999 a 7-digit name sorts before 999999, so latest() returns an old file and prune() (src/backup.rs:343-350) deletes the newest backups. Every commit and renew raises the generation (src/vault.rs:297, 912), so this is reachable only after a million changes. Fix: sort by the parsed generation_of() value, or zero-pad to 20 digits.",
+      "mirror_once prunes and picks 'newest' in the synced mirror folder by name alone (src/mirror.rs:56-57). Files with this vault's prefix and a higher generation, written into iCloud Drive by another device on the same account, would outrank the real copies: the mirror would delete each real backup right after copying it and still report ok. Anyone who can write the synced folder can already delete files there, and the report is stated as unverified. Hardening: prune the mirror only among names that match files the mirror copied from the local folder, or use the local folder's generation set.",
+      "MirrorReport sanitizes 'detail' for control characters but stores newest_file with only a 300-char cap (src/server.rs:834-838). It is not printed by the text status today; if a later display prints it, apply the same control-character filter."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fplatform.rs%23harden_process::src%2Fsecret.rs%23WipingBuf::src%2Fsecret.rs::MEMORY-SAFETY-AND-BINARY.md%23FFI%20and%20ABI%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/platform.rs#harden_process",
+      "boundary": "src/secret.rs#WipingBuf",
+      "subsystem": "src/secret.rs",
+      "attack_class": "MEMORY-SAFETY-AND-BINARY.md#FFI and ABI attack classes"
+    },
+    "surface": "process memory and crash dumps; unsafe FFI",
+    "boundary": "zeroize, mlock, PR_SET_DUMPABLE, RLIMIT_CORE, PT_DENY_ATTACH",
+    "subsystem": "src/secret.rs",
+    "attack_class": "FFI and ABI attack classes",
+    "starting_paths": [
+      "src/secret.rs",
+      "src/platform.rs",
+      "src/store.rs",
+      "src/stream.rs",
+      "src/keyprotect/mod.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Cryptography and secrets",
+    "selected_companion_blocks": [
+      "MEMORY-SAFETY-AND-BINARY.md#Core discipline",
+      "MEMORY-SAFETY-AND-BINARY.md#Lifetime, type, and concurrency attack classes",
+      "MEMORY-SAFETY-AND-BINARY.md#FFI and ABI attack classes",
+      "MEMORY-SAFETY-AND-BINARY.md#Universal moves",
+      "MEMORY-SAFETY-AND-BINARY.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "MEMORY-SAFETY-AND-BINARY.md#Kernel and privileged-interface attack classes",
+        "reason": "no kernel code"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-leak",
+    "reviewed_paths": [
+      "src/backup.rs",
+      "src/client.rs",
+      "src/keyprotect/mod.rs",
+      "src/main.rs",
+      "src/model.rs",
+      "src/platform.rs",
+      "src/secret.rs",
+      "src/server.rs",
+      "src/store.rs",
+      "src/stream.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-leak",
+        "reviewed_paths": [
+          "src/platform.rs",
+          "src/main.rs"
+        ],
+        "invariant": "Every vault process (CLI and daemon) disables core dumps and same-UID ptrace before handling secrets (R3)",
+        "method": "source",
+        "result": "harden_process is the first statement of main (src/main.rs:229), so the daemon subcommand and every CLI command run with RLIMIT_CORE 0 and PR_SET_DUMPABLE 0 (Linux) or PT_DENY_ATTACH (macOS) before any thread is spawned. Return values are ignored, but the calls take constant valid arguments.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-leak",
+        "reviewed_paths": [
+          "src/secret.rs"
+        ],
+        "invariant": "mlock/munlock FFI pointer-length contract and WipingBuf growth never leave an unwiped copy or touch freed memory",
+        "method": "source",
+        "result": "lock/munlock pass the Box<[u8]> pointer and byte length, skip empty boxes (dangling pointer), and munlock runs after zeroize on the still-owned allocation. WipingBuf::extend_from_slice copies into a new Vec sized >= needed, zeroizes the whole old allocation including spare capacity, then pushes without realloc; into_secret moves the Vec into from_vec, which copies then zeroizes. random_password stays within a pre-sized Zeroizing Vec (length bounded 12..=128 at src/vault.rs:408) and rejection sampling (limit 216 for 72 symbols) is uniform. same_as is constant-time over equal lengths.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-leak",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/stream.rs",
+          "src/keyprotect/mod.rs",
+          "src/store.rs",
+          "src/backup.rs",
+          "src/client.rs",
+          "src/model.rs"
+        ],
+        "invariant": "Buffers holding plaintext requests, keys and the vault document are wiped",
+        "method": "source",
+        "result": "Request lines go through WipingBuf and a Zeroizing chunk (src/server.rs:218-249); token-refresh bodies grow by manual copy into Zeroizing (src/stream.rs:274-290); the systemd-creds key read uses fixed Zeroizing arrays; store::save/load and backup wrap the plaintext in Zeroizing. Residual unwiped copies exist only in heap freed by growth or by third-party scratch buffers (see hardening); with RLIMIT_CORE 0 and PR_SET_DUMPABLE 0 no lower-trust principal in the stated model can read them, so they are not findings.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-leak",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Fprotocol.rs%23op%20add_sealed::src%2Fintake.rs%23open::src%2Fintake.rs::ATTACK-CLASSES.md%23Access%20control",
+    "canonical_refs": {
+      "surface": "src/protocol.rs#op add_sealed",
+      "boundary": "src/intake.rs#open",
+      "subsystem": "src/intake.rs",
+      "attack_class": "ATTACK-CLASSES.md#Access control"
+    },
+    "surface": "add_sealed (relay-supplied sealed value)",
+    "boundary": "age intake key, name and kind binding, replace only for fixed-host kinds (R40)",
+    "subsystem": "src/intake.rs",
+    "attack_class": "Access control",
+    "starting_paths": [
+      "src/intake.rs",
+      "src/server.rs",
+      "src/vault.rs",
+      "src/kinds.rs",
+      "src/model.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Access control",
+    "selected_companion_blocks": [
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Core discipline",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Replay, ordering, and transaction attack classes",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Universal moves",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "PROTOCOLS-RPC-AND-MESSAGING.md#Broker and queue isolation attack classes",
+        "reason": "no broker"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-intake",
+    "reviewed_paths": [
+      "src/intake.rs",
+      "src/kinds.rs",
+      "src/model.rs",
+      "src/protocol.rs",
+      "src/server.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-intake",
+        "reviewed_paths": [
+          "src/intake.rs",
+          "src/protocol.rs",
+          "src/model.rs"
+        ],
+        "invariant": "A relayed sealed value is stored only under the name and kind sealed inside the ciphertext; rule, site, username, app and leasable come only from inside it.",
+        "method": "source",
+        "result": "intake::open (src/intake.rs:94-126) caps the base64 at 64 KiB, decrypts with the X25519 intake identity only, parses SealedWire with deny_unknown_fields, refuses v other than 1, and refuses unless wire.name == request name and wire.kind == request kind (line 113), both decoded as the same Kind enum (src/model.rs, src/protocol.rs:705-707). Rule, site, username, app and leasable are read only from the sealed object (src/server.rs:534-559). The relay can change only the unsealed replace flag, and that flag is checked below.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-intake",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/vault.rs",
+          "src/kinds.rs"
+        ],
+        "invariant": "R40: a sealed value replaces a stored secret only for a fixed-host kind (claude_plan, codex_login, grok_login, google_ai_login), and only one of the same kind; it can never replace an api-key, login, 2fa, personal_details, app_secret or wallet, and can never add a wallet or set leasable on a non-app_secret.",
+        "method": "source",
+        "result": "src/server.rs:521 refuses replace when kinds::spec(kind) is None, and kinds::TABLE (src/kinds.rs:247) holds exactly the four fixed-host kinds. Vault::put_as (src/vault.rs:436-439) refuses NameTaken without replace and WrongKind when the stored record's kind differs, so a sealed claude_plan cannot overwrite an api-key of the same name. new_record refuses Kind::Wallet (src/vault.rs:474), app on non-app_secret (489-491) and leasable on non-app_secret (494-496). No other add path sets replace for the restricted kinds: Request::Add calls vault.add, which is put(new, false) (src/server.rs:727, src/vault.rs:382-384). A relay's remaining powers (seal its own value, swap a fixed-host plan or login token, replay an older sealed value) are the accepted risks stated in src/intake.rs:27-31 and the threat model's 2026-11-16 risk table.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-intake",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/server.rs"
+        ],
+        "invariant": "A replace by a sealed login cannot race a vault renewal and leave the older login's renewed tokens over the newly sealed sign-in (stale-write ordering).",
+        "method": "source",
+        "result": "A replace sets version = old + 1 under the vault mutex (src/vault.rs:440-447), and Vault::renew stores only onto the version it renewed, dropping the renewal with VersionMismatch otherwise (src/vault.rs:898-903). A late renewal therefore cannot overwrite a sealed replacement.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-intake",
+    "hardening_notes": [
+      "R40 refuses a sealed app_secret replace so that a build never runs with the sealer's value. A sealed app_secret can still be added, leasable, under any name the vault does not hold. That includes a name a lease reports as missing, and the gap during the documented change procedure 'delete, then add' (README.md:411-412). In those cases the build gets the sealer's value, so the threat model's claim 'can't change the value a build gets' holds only for names already held. This falls under the accepted 'seal one of its own' risk (src/intake.rs:29-31). Consider making a sealed leasable add need owner confirmation, or having the host refuse a lease of a name it did not see the owner add.",
+      "lease::choose (src/lease.rs:130-153) matches by name or id only and never compares the record's app with the job's application. Any leasable app secret can be leased to any job, so the per-application tag is advisory.",
+      "Since fill's origin is caller-asserted (README.md:319-324), any same-UID process can read a login password by naming an origin on its site. The current design page's 2026-11-17 block describes an engine:\"app\" caller-signature check (platform::peer_is_volgenic_app). That check is absent from this tree (proposed in vault PR 24, not merged), and the README's accepted gap stands until it lands.",
+      "A sealed replace of a fixed-host kind takes site from the sealed object without semantic validation (src/server.rs:545-549). It cannot redirect traffic, because kinds fix the hosts, but it can set a misleading site label shown by list."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fprotocol.rs%23op%20fill::src%2Fsites.rs%23check_origin::src%2Ffill.rs::ATTACK-CLASSES.md%23Business%20logic",
+    "canonical_refs": {
+      "surface": "src/protocol.rs#op fill",
+      "boundary": "src/sites.rs#check_origin",
+      "subsystem": "src/fill.rs",
+      "attack_class": "ATTACK-CLASSES.md#Business logic"
+    },
+    "surface": "fill, generate_login and totp ops",
+    "boundary": "https origin on the login's registrable domain (PSL)",
+    "subsystem": "src/fill.rs",
+    "attack_class": "Business logic",
+    "starting_paths": [
+      "src/fill.rs",
+      "src/sites.rs",
+      "src/totp.rs",
+      "src/secret.rs",
+      "src/vault.rs",
+      "src/server.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "WEB-PROTOCOL-AND-AUTH.md#Core discipline",
+      "WEB-PROTOCOL-AND-AUTH.md#MFA, passkey, and account-transition attack classes",
+      "WEB-PROTOCOL-AND-AUTH.md#Universal moves",
+      "WEB-PROTOCOL-AND-AUTH.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#Federated-identity attack classes",
+        "reason": "not on this path"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-intake",
+    "reviewed_paths": [
+      "src/fill.rs",
+      "src/server.rs",
+      "src/sites.rs",
+      "src/totp.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-intake",
+        "reviewed_paths": [
+          "src/fill.rs",
+          "src/sites.rs",
+          "src/server.rs"
+        ],
+        "invariant": "fill answers a login's values only for a Kind::Login record and only for an https origin, with no userinfo, path, query or fragment, whose registrable domain (PSL) equals the login site's registrable domain. Values leave only after the audit line is flushed.",
+        "method": "source",
+        "result": "fill::check (src/fill.rs:87-94) filters to Kind::Login, derives the domain with sites::login_domain, and calls sites::check_origin (src/sites.rs:48-71). check_origin refuses userinfo (53-55), a scheme other than https (56-58), and any path other than '' or '/', a query or a fragment (59-61). It also refuses IP hosts (62-65) and requires registrable_domain(host) == domain (66-70). Both sides normalize through url::Url (punycode), trim the trailing dot and lowercase (src/sites.rs:15-33), so the two sides agree. A public suffix or a single label has no registrable domain, so github.io cannot match alice.github.io. Server::fill (src/server.rs:918-939) writes the audit line with record() before replying. Ignoring the port and treating the origin as caller-asserted are accepted design choices (README.md:294-306, 319-324).",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-intake",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/sites.rs",
+          "src/fill.rs"
+        ],
+        "invariant": "generate_login cannot be used to move an existing password to another site or to read a stored password.",
+        "method": "source",
+        "result": "Vault::generate_login (src/vault.rs:400-424) bounds length to 12..=128, stores a site normalized by sites::normalize_new_site (src/sites.rs:75-81) and a vault-made password, and refuses a name already held (put_as with replace=false, src/vault.rs:438). It answers the summary only, never the value. Sealed and plain logins cannot be replaced (no kind spec, src/server.rs:521), so no sealed or socket path changes an existing login's site.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-intake",
+        "reviewed_paths": [
+          "src/totp.rs",
+          "src/vault.rs",
+          "src/server.rs"
+        ],
+        "invariant": "totp answers only the current code of a Kind::TwoFactor record, from the vault's clock. The seed and the caller's time never enter.",
+        "method": "source",
+        "result": "vault::totp_code (src/vault.rs:1258-1264) refuses other kinds with WrongKind and uses now_unix(). totp::code_at (src/totp.rs:111-127) has digits 6..=8 and period 10..=300, enforced at parse (src/totp.rs:73-84), so the modulus and the offset indexing stay in range for SHA-1, SHA-256 and SHA-512 digests. The reply carries only the code and seconds_left (src/server.rs:475-489).",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-intake",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Fprotocol.rs%23op%20lease::src%2Flease.rs%23choose::src%2Flease.rs::DATA-ISOLATION-AND-LIFECYCLE.md%23Deletion%2C%20revocation%2C%20and%20lifecycle%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/protocol.rs#op lease",
+      "boundary": "src/lease.rs#choose",
+      "subsystem": "src/lease.rs",
+      "attack_class": "DATA-ISOLATION-AND-LIFECYCLE.md#Deletion, revocation, and lifecycle attack classes"
+    },
+    "surface": "lease op",
+    "boundary": "only leasable app secrets, sealed to the job's age key with expiry",
+    "subsystem": "src/lease.rs",
+    "attack_class": "Deletion, revocation, and lifecycle attack classes",
+    "starting_paths": [
+      "src/lease.rs",
+      "src/server.rs",
+      "src/model.rs",
+      "src/details.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Access control",
+    "selected_companion_blocks": [
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Deletion, revocation, and lifecycle attack classes",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DATA-ISOLATION-AND-LIFECYCLE.md#Tenant and object-isolation attack classes",
+        "reason": "single tenant"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-intake",
+    "reviewed_paths": [
+      "src/details.rs",
+      "src/lease.rs",
+      "src/model.rs",
+      "src/server.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-intake",
+        "reviewed_paths": [
+          "src/lease.rs",
+          "src/server.rs",
+          "src/model.rs"
+        ],
+        "invariant": "Only an app_secret added as leasable is sealed to the job key. Any other held secret named by name or id refuses the whole lease, and nothing is sealed.",
+        "method": "source",
+        "result": "lease::choose (src/lease.rs:130-153) resolves each SecretRef with VaultDoc::find_ref (src/model.rs:341-346). It collects every record that fails Record::may_lease (kind == AppSecret && leasable == Some(true), src/model.rs:244-247) and returns NotLeasable before anything is sealed. It also refuses the same record named by both name and id. lease::seal re-checks may_lease (src/lease.rs:184-186). Server::lease (src/server.rs:863-896) seals only after choose succeeds and writes the per-secret audit lines with record() before replying.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-intake",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/server.rs",
+          "src/model.rs"
+        ],
+        "invariant": "The leasable flag and the value a lease hands out cannot be changed after the add, and a deleted or renamed secret is not leased under a stale identity.",
+        "method": "source",
+        "result": "The leasable flag is set only in new_record (src/vault.rs:566). Replace is refused for app_secret (no kind spec, src/server.rs:521). import_plans and import_logins touch only their own kinds. rename changes only the name and version (src/vault.rs:1091-1113), and delete removes the record (src/vault.rs:1069-1088). Each lease reads a fresh snapshot (src/server.rs:875), so a deleted secret comes back as missing and a renamed one is sealed under its current name. That matches the job-side name check. A lease already handed out lives until its sealed expiry, and the design states the vault cannot revoke it (src/lease.rs:20-24, README.md:429-431). Restore of a backup that still holds a deleted secret needs the recovery key and belongs to the backup/restore unit.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-intake",
+        "reviewed_paths": [
+          "src/lease.rs",
+          "src/details.rs"
+        ],
+        "invariant": "The sealed lease plaintext binds job, name and expires_at, and the stored value cannot inject or override those fields.",
+        "method": "source",
+        "result": "lease::plaintext (src/lease.rs:167-179) writes every field through details::write_field (src/details.rs:110-129), which escapes the double quote, the backslash and all bytes 0x00-0x1f. The value is valid UTF-8 without a NUL (src/lease.rs:157-164), the name passes validate_name, and the job is printable ASCII (src/lease.rs:79-82). The value cannot break out of its string to add a duplicate lease, name or expires_at key. TTL is bounded to 60..=86400 (src/lease.rs:87-89), and the recipient must be an X25519 age1 key (src/lease.rs:92-96).",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-intake",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Fprotocol.rs%23op%20proxy::src%2Frules.rs%23check_destination::src%2Fproxy.rs::ATTACK-CLASSES.md%23Injection",
+    "canonical_refs": {
+      "surface": "src/protocol.rs#op proxy",
+      "boundary": "src/rules.rs#check_destination",
+      "subsystem": "src/proxy.rs",
+      "attack_class": "ATTACK-CLASSES.md#Injection"
+    },
+    "surface": "proxy op (agent-chosen method, path, query, headers, body, host, port)",
+    "boundary": "API key rule binding and caller header filter",
+    "subsystem": "src/proxy.rs",
+    "attack_class": "Injection",
+    "starting_paths": [
+      "src/proxy.rs",
+      "src/rules.rs",
+      "src/server.rs",
+      "src/protocol.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Injection",
+    "selected_companion_blocks": [
+      "WEB-PROTOCOL-AND-AUTH.md#Core discipline",
+      "WEB-PROTOCOL-AND-AUTH.md#HTTP framing and cache attack classes",
+      "WEB-PROTOCOL-AND-AUTH.md#API-key and mTLS attack classes",
+      "WEB-PROTOCOL-AND-AUTH.md#Universal moves",
+      "WEB-PROTOCOL-AND-AUTH.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#Browser-session attack classes",
+        "reason": "no browser session or cookies issued by the vault"
+      },
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#Federated-identity attack classes",
+        "reason": "proxy carries static API keys only"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "candidate",
+    "agent_id": "hunter-proxy",
+    "reviewed_paths": [
+      "src/protocol.rs",
+      "src/proxy.rs",
+      "src/rules.rs",
+      "src/server.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-proxy",
+        "reviewed_paths": [
+          "src/rules.rs",
+          "src/server.rs",
+          "src/protocol.rs"
+        ],
+        "invariant": "A caller-named host/port different from the rule's is refused before sending; without them the rule's host and port are used.",
+        "method": "source",
+        "result": "check_destination (rules.rs:217-228) runs before body decoding and proxy::check (server.rs:1453); destination is always rule.host/rule.port (proxy.rs:78-79); post-parse host equality check (proxy.rs:81) holds because check_path requires a leading '/', so no authority injection ('@', '\\\\', '//') is possible.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-proxy",
+        "reviewed_paths": [
+          "src/proxy.rs",
+          "src/rules.rs"
+        ],
+        "invariant": "Header injection: caller header names/values cannot add CR/LF/NUL, override the key header, Host, framing or encoding headers.",
+        "method": "source",
+        "result": "Names must be RFC token chars and are lower-cased; values refuse CR/LF/NUL and HeaderValue::from_str rejects other controls (proxy.rs:91); rule header is inserted after caller headers with insert, replacing any copy (proxy.rs:99); content-length/transfer-encoding/te/connection/upgrade/host/forwarded/accept-encoding refused; HTTP/2 is not enabled (reqwest default-features=false), so no pseudo-header path.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-proxy",
+        "reviewed_paths": [
+          "src/proxy.rs",
+          "src/rules.rs"
+        ],
+        "invariant": "The rule's method and path binding holds at the upstream, not only on the request line.",
+        "method": "local",
+        "result": "Probe of proxy::check: direct DELETE refused rule_mismatch and '../' refused bad_request, but POST with x-http-method-override/x-http-method/x-method-override: DELETE, GET with x-original-url/x-rewrite-url, '?_method=DELETE', '/..;/' and '%252e%252e' paths were all accepted and sent unchanged to the rule host. Raised as two needs_validation candidates (upstream behavior not source-visible).",
+        "artifact": "agents/hunter-proxy/artifacts/out.txt"
+      }
+    ],
+    "result_fingerprints": [
+      "rules.rs/check_caller_headers/method-and-path-override-headers-not-refused",
+      "rules.rs/check_path/dotdot-semicolon-and-double-encoding-pass-prefix"
+    ],
+    "unresolved": [],
+    "planned_hunter": "hunter-proxy",
+    "hardening_notes": [
+      "Echo scrub matches only whole, aligned forms of the key (scrub.rs:13-37). A caller may send Range (accepted by check_caller_headers, shown in the probe), so an upstream echo endpoint that honors Range on dynamic responses would return key slices the scrub cannot see; also base64 of a larger blob in which the key is not 3-byte aligned (e.g. base64 of 'Bearer <key>', prefix 7 bytes) and JSON-escaped forms ('\\/', '\\u00xx') are not matched. Consider refusing range/if-range in REFUSED_HEADERS and adding needles for the full header value (prefix+key+suffix) in its base64 forms at the three alignments.",
+      "A reply whose bytes are compressed without a Content-Encoding header (e.g. Transfer-Encoding: gzip, chunked, or a gzip content type) bypasses the scrub's view; only reachable if the upstream compresses unasked, since te and accept-encoding are refused.",
+      "A very short stored key (1-2 bytes) makes nearly every reply echo_blocked; parse/add could set a minimum key length (availability only, same principal)."
+    ],
+    "validation_decisions": {
+      "rules.rs/check_caller_headers/method-and-path-override-headers-not-refused": "needs_validation",
+      "rules.rs/check_path/dotdot-semicolon-and-double-encoding-pass-prefix": "needs_validation"
+    }
+  },
+  {
+    "coverage_id": "src%2Fprotocol.rs%23op%20rename%20delete%20import_plan::src%2Fvault.rs%23renew::src%2Fvault.rs::DATA-ISOLATION-AND-LIFECYCLE.md%23Deletion%2C%20revocation%2C%20and%20lifecycle%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/protocol.rs#op rename delete import_plan",
+      "boundary": "src/vault.rs#renew",
+      "subsystem": "src/vault.rs",
+      "attack_class": "DATA-ISOLATION-AND-LIFECYCLE.md#Deletion, revocation, and lifecycle attack classes"
+    },
+    "surface": "src/protocol.rs#op rename, delete and import_plan",
+    "boundary": "src/vault.rs#renew version check (record version as the renewal's compare-and-set)",
+    "subsystem": "src/vault.rs",
+    "attack_class": "Deletion, revocation, and lifecycle attack classes",
+    "starting_paths": [
+      "src/vault.rs",
+      "src/server.rs",
+      "src/health.rs",
+      "src/protocol.rs",
+      "src/kinds.rs",
+      "src/wallet.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Deletion, revocation, and lifecycle attack classes",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules",
+      "MEMORY-SAFETY-AND-BINARY.md#Core discipline",
+      "MEMORY-SAFETY-AND-BINARY.md#Lifetime, type, and concurrency attack classes",
+      "MEMORY-SAFETY-AND-BINARY.md#Universal moves",
+      "MEMORY-SAFETY-AND-BINARY.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DATA-ISOLATION-AND-LIFECYCLE.md#Tenant and object-isolation attack classes",
+        "reason": "single tenant"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 2,
+    "status": "covered",
+    "agent_id": "hunter2-lifecycle",
+    "reviewed_paths": [
+      "src/health.rs",
+      "src/kinds.rs",
+      "src/server.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter2-lifecycle",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/server.rs"
+        ],
+        "invariant": "Vault::renew stores a renewal only onto the version it was renewed from (compare-and-set on record.version), and a dropped renewal is only one whose value was replaced",
+        "method": "local",
+        "result": "Ran a bounded probe on a scratch vault with dummy logins. renew(seen=1) on an untouched record succeeds (version 2). After rename (value unchanged, version 1 to 2), renew(seen=1) returns version_mismatch, so the renewed value is not stored. server.rs:1349 drops VersionMismatch with no log or audit line. rename (vault.rs:1105) raises the version without changing the value, so a rename during an in-flight refresh throws away a rotated refresh token. claim_refresh (vault.rs:1055) also raises it, but cannot race, because an unclaimed login is never renewed. Only same-UID callers can rename, and they can already delete the login (vault.rs:1069), so this crosses no boundary; it is recorded as hardening.",
+        "artifact": "agents/hunter2-lifecycle/artifacts/out.txt"
+      },
+      {
+        "agent_id": "hunter2-lifecycle",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/server.rs",
+          "src/health.rs"
+        ],
+        "invariant": "Delete, and delete then re-add under the same name, never lets an in-flight or later renewal, health entry or stream act on the removed record",
+        "method": "source",
+        "result": "delete removes by id (vault.rs:1084). renew looks the record up by id and fails UnknownSecret for a deleted one (vault.rs:900), and the server logs that and does not store it (server.rs:1350-1357). A re-added name gets a fresh id (vault.rs:471), so old health entries (keyed by id, pruned at health.rs:106) and the renewing locks never bind to it. A stream already running keeps its Arc snapshot only for that call, and the next snapshot comes from with_vault/publish. Wallets are refused deletion (vault.rs:1076). No tombstone bypass found.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-lifecycle",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/kinds.rs"
+        ],
+        "invariant": "import_plan and import_login cannot overwrite a login the vault renews (claimed), nor a secret of another kind, and cannot roll back a renewed token",
+        "method": "source",
+        "result": "import_one replaces only Kind::ClaudePlan records (vault.rs:876), which have no refresher. import_login refuses a claimed login with a different auth.json (LoginClaimed, vault.rs:1013-1014) and returns Unchanged on the same digest (vault.rs:1010). An unclaimed login is never renewed by the vault (server.rs:1267), so no renew/import race can roll back a rotated token. A name held by another kind is NameTaken. Both imports run reload and ready_for_change and commit once. Held.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-lifecycle",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/server.rs"
+        ],
+        "invariant": "Renewal concurrency: one refresh per login at a time and no double spend of a refresh token",
+        "method": "source",
+        "result": "renew_login takes a per-id mutex (server.rs:1291-1295), re-reads the snapshot and returns early if the version moved (server.rs:1302), then stores through with_vault under the vault mutex with the version check (vault.rs:901). Two callers that find a login due cannot both send the same refresh token. renew skips ready_for_change on purpose and still writes the audit head and file before returning (vault.rs:912-914). Held, apart from the rename version bump noted above.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter2-lifecycle",
+    "critic_reason": "No unit names rename, delete or import_plan as a surface. The memory unit selected the Lifetime, type and concurrency block, but its checks cover only mlock and wiping, not the daemon's shared state. src/vault.rs:1091-1113 renames any kind, wallets and refreshable logins included, and raises the version. src/vault.rs:1069-1088 deletes. src/vault.rs:813-889 replaces a claude_plan value from a plain socket request. src/server.rs:1290-1349 renew_login sends the stored refresh token (the provider then retires it) and treats a VersionMismatch from Vault::renew (src/vault.rs:898-903) as 'a new sign-in replaced it', dropping the rotated token. The renewal unit checked only that path; it did not check a rename, delete or other version bump landing in the same window. The health book is also keyed by id+version (src/health.rs:55-68). A hunter should map every version-bumping op against in-flight renewals, leases, signs and health state.",
+    "hardening_notes": [
+      "src/vault.rs:898-906 / src/server.rs:1349: the renewal compare-and-set uses record.version, which rename (vault.rs:1105) also raises without changing the value. A rename that lands while a refresh call is in flight makes Vault::renew return VersionMismatch, and the server drops the renewed tokens silently (no log, no audit line), although source says the provider has already retired the old refresh token. The login is then lost at its next renewal. Locally observed (artifact out.txt). Only same-UID callers can rename, and they can already delete, so no boundary is crossed. Fix: compare a value digest (or a separate value_version) instead of version, or take the per-login renewing lock in rename. At minimum, audit and log the dropped renewal.",
+      "src/server.rs:1214: the 401 renew-and-retry passes early=false, so the early_gap_secs throttle never applies to it, and a caller alternating 401-inducing and successful calls forces one refresh-token rotation per cycle. Consider applying a minimum gap after a successful renewal on the 401 path too."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fprotocol.rs%23op%20sign::src%2Fwallet.rs%23caps::src%2Fwallet.rs::ATTACK-CLASSES.md%23Business%20logic",
+    "canonical_refs": {
+      "surface": "src/protocol.rs#op sign",
+      "boundary": "src/wallet.rs#caps",
+      "subsystem": "src/wallet.rs",
+      "attack_class": "ATTACK-CLASSES.md#Business logic"
+    },
+    "surface": "sign and sign-cancel ops",
+    "boundary": "per-payment, daily and fee caps; nonce and ladder bounds",
+    "subsystem": "src/wallet.rs",
+    "attack_class": "Business logic",
+    "starting_paths": [
+      "src/wallet.rs",
+      "src/vault.rs",
+      "src/server.rs",
+      "src/evm.rs",
+      "src/solana.rs",
+      "src/tron.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Core discipline",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Replay, ordering, and transaction attack classes",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Universal moves",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "PROTOCOLS-RPC-AND-MESSAGING.md#Broker and queue isolation attack classes",
+        "reason": "no broker"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-wallet",
+    "reviewed_paths": [
+      "README.md",
+      "src/evm.rs",
+      "src/protocol.rs",
+      "src/server.rs",
+      "src/solana.rs",
+      "src/tron.rs",
+      "src/vault.rs",
+      "src/wallet.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/protocol.rs",
+          "src/server.rs"
+        ],
+        "invariant": "A sign request carries only structured fields; a cancel cannot carry a recipient, token, amount or another chain's terms, and a payment must name token, to and amount.",
+        "method": "source",
+        "result": "parse_request's \"sign\" arm (src/protocol.rs:726-771) collects every payment and Solana/Tron field into `extra` for a cancel, which check_cancel refuses; a payment missing token/to/amount is refused. SignFields has no raw-bytes, data or value field. Server dispatch (src/server.rs:664-689) passes the parsed fields straight to Vault::sign_payment / sign_cancel; no other path signs.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/server.rs"
+        ],
+        "invariant": "Check, cap decision, signing, spend recording and the durable commit are one atomic step per wallet; no concurrent request or partial failure can return signatures without the spend being recorded.",
+        "method": "source",
+        "result": "Server::with_vault holds the vault Mutex for the whole closure (src/server.rs:322-328). Vault::sign_payment (src/vault.rs:677-726) reloads from disk, runs wallet::check, wallet::decide, wallet::sign, wallet::record, check_fits, then commit (audit line, vault file, backup) before returning signatures; any failure after record returns an error (spend possibly persisted, signatures withheld), which over-counts and never under-counts. sign_cancel (src/vault.rs:732-788) follows the same order. A retried EVM payment after a backup failure matches as a replacement and counts nothing again, which is the intended behavior.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/wallet.rs",
+          "README.md"
+        ],
+        "invariant": "Per-payment, rolling-daily amount and daily fee caps are enforced on every signature; a replacement counts zero amount only when only one of the two transactions can ever land.",
+        "method": "source",
+        "result": "wallet::decide (src/wallet.rs:901-948) checks per_payment first for every request (replacements included), then the daily amount and fee caps with saturating sums over the same in_window predicate (at + DAY_SECS > now) that record's retain uses. Replacement matching requires, on Ethereum, identity None and the same nonce, token, canonical recipient and units (one tx per nonce can mine); on Solana/Tron the same sha256 identity of the vault-built message/raw_data (deterministic signing, same bytes, lands once). A replacement's fee counts the delta and record keeps the max. MAX_SPENDS bounds new spends. Indices from decide are used against the same unmodified WalletInfo in record. No under-count found.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/wallet.rs",
+          "src/solana.rs",
+          "src/tron.rs",
+          "src/evm.rs"
+        ],
+        "invariant": "Per-transaction fee caps and ladder bounds hold for every signed rung, and the worst-case fee counted equals the most each chain can charge.",
+        "method": "source",
+        "result": "check (src/wallet.rs:723-886) refuses max_fee_per_gas 0, tip > fee and first fee > wallet cap; ladder steps > MAX_LADDER refused; ladder() (src/wallet.rs:649-664) stops at the first rung above min(caller ceiling, wallet cap); raise() is monotone so the tip never passes the fee. EVM worst = gas_limit (<=150,000) x top max_fee, which bounds EIP-1559 burn. Solana worst = 5,000 + ceil(price x limit / 1e6) + ATA rent when created, price capped, limit 1,000..200,000 (src/solana.rs:160-171). Tron worst = fee_limit (capped, >0) + bandwidth of the signed size at 1,000 sun/byte (src/tron.rs:187-191). check_cancel/decide_cancel (src/wallet.rs:1119-1201) apply the same fee cap and ladder ceiling and count the delta over the costliest spend at that nonce.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/wallet.rs",
+          "src/solana.rs",
+          "src/tron.rs"
+        ],
+        "invariant": "Solana and Tron signatures expire quickly so a signature cannot be held and landed outside the window it was counted in; no durable-nonce or long-lived expiration path exists.",
+        "method": "source",
+        "result": "Tron: expiration must be > timestamp, within 60,000 ms of it, > vault now_ms and <= now_ms + 90,000 (src/wallet.rs:841-849). Solana: the message's first instruction is always ComputeBudget SetComputeUnitLimit (src/solana.rs:194-196), so it can never be a durable-nonce transaction (which requires AdvanceNonceAccount at index 0); its life is bounded by the recent blockhash. Cancels are refused on Solana/Tron (src/wallet.rs:1126-1132).",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/vault.rs"
+        ],
+        "invariant": "No other socket operation can change a wallet's caps, roll back its spends, replace or delete its record without the recovery key.",
+        "method": "source",
+        "result": "new_record refuses Kind::Wallet (src/vault.rs:474-478), put_as refuses a kind change on an existing name (src/vault.rs:439), import_one refuses a non-claude_plan existing name, delete refuses wallets (src/vault.rs:1076-1080), set_wallet_caps and create_wallet call check_recovery_key first (src/vault.rs:599, 651); reset and restore need the recovery key. The only writers of WalletInfo.caps/spends are create_wallet, set_wallet_caps, wallet::record and wallet::record_cancel.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-wallet",
+    "hardening_notes": [
+      "Ethereum signatures never expire, so the rolling 24-hour caps bound how fast the vault signs, not how fast payments land: a relay or agent that holds each day's signed payments at consecutive nonces can broadcast several days' worth at once, and check_cancel (src/wallet.rs:1143-1156) only cancels a nonce signed for in the last 24 hours, so a held payment older than that can be voided only by signing a new payment at its nonce. README.md:559-560 says the caps 'never under-count one that landed', which holds per signing time only. Consider stating this in the README's Wallets section, or letting the owner cancel at any nonce the wallet has ever signed for.",
+      "Test-network wallets (solana_devnet, tron_nile) put no network identifier into the signed bytes, because Solana and Tron have none. The network is chosen only by the recent blockhash or ref block the caller supplies, so a caller that gives a mainnet blockhash gets a dry-run wallet's transfer that is valid on mainnet (src/wallet.rs:813, 836-838). This matters only if the dry-run address also holds mainnet funds. Consider documenting that a test wallet's address must never be funded on mainnet.",
+      "While the Recovery Kit file stays at ~/Volgenic Vault Recovery Kit.txt (0600, README.md:43; confirm-kit is optional), any process running as the owner's user can read the recovery key that guards wallet-create and wallet-caps (src/vault.rs:575-585). This is the accepted same-UID trade-off, the same exposure as the vault key file. Consider making the CLI's wallet create step urge confirm-kit."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fprotocol.rs%23op%20stream::src%2Fstream.rs%23plan::src%2Fstream.rs::ATTACK-CLASSES.md%23Injection",
+    "canonical_refs": {
+      "surface": "src/protocol.rs#op stream",
+      "boundary": "src/stream.rs#plan",
+      "subsystem": "src/stream.rs",
+      "attack_class": "ATTACK-CLASSES.md#Injection"
+    },
+    "surface": "stream op (kind-table or rule destination, streamed reply)",
+    "boundary": "kind table hosts, paths, set headers; streaming scrub",
+    "subsystem": "src/stream.rs",
+    "attack_class": "Injection",
+    "starting_paths": [
+      "src/stream.rs",
+      "src/kinds.rs",
+      "src/scrub.rs",
+      "src/server.rs",
+      "src/rules.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Injection",
+    "selected_companion_blocks": [
+      "WEB-PROTOCOL-AND-AUTH.md#Core discipline",
+      "WEB-PROTOCOL-AND-AUTH.md#HTTP framing and cache attack classes",
+      "WEB-PROTOCOL-AND-AUTH.md#API-key and mTLS attack classes",
+      "WEB-PROTOCOL-AND-AUTH.md#Universal moves",
+      "WEB-PROTOCOL-AND-AUTH.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#Browser-session attack classes",
+        "reason": "no browser session"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "candidate",
+    "agent_id": "hunter-stream",
+    "reviewed_paths": [
+      "src/audit.rs",
+      "src/kinds.rs",
+      "src/rules.rs",
+      "src/scrub.rs",
+      "src/server.rs",
+      "src/stream.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/stream.rs",
+          "src/kinds.rs"
+        ],
+        "invariant": "stream::plan binds a kind-table call to one of the kind's fixed hosts, methods and whole-segment path prefixes, and an API key to its rule's host, port, methods and prefix; the URL host is re-checked after parsing",
+        "method": "source",
+        "result": "Holds: the host is chosen from spec.hosts (a case-insensitive match returns the static name) or rule.host; the port is 443 or rule.port; Streamer::request re-checks url.host_str() and the scheme. The caller never supplies the host string that reaches the URL.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/rules.rs",
+          "src/stream.rs"
+        ],
+        "invariant": "Caller header names and values cannot inject CR/LF, override vault-set credential headers, or alter framing (content-length, transfer-encoding, te, connection, host, accept-encoding, x-forwarded-*, proxy-*)",
+        "method": "source",
+        "result": "Holds: is_token on names; CR/LF/NUL refused in values and HeaderValue::from_str rejects other controls; set headers and REFUSED_HEADERS refused; the vault inserts set headers after caller headers with insert(); reqwest is built without the http2 feature (default-features = false), so HTTP/1.1 only and no h2 downgrade divergence.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/rules.rs"
+        ],
+        "invariant": "The caller path cannot escape the allowed prefix through dot segments, encoded slashes or dots, backslashes, empty segments, fragments or the Google colon-method form",
+        "method": "source",
+        "result": "Holds: check_path refuses ., .., //, backslash, %2f %5c %2e %00 (case-insensitive), non-graphic bytes and #; path_within matches whole segments and the colon prefix only within one segment.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/kinds.rs",
+          "src/rules.rs",
+          "src/stream.rs"
+        ],
+        "invariant": "The google_ai_login rule that no other credential or billed project can be named on a call is enforced on every door, not just headers",
+        "method": "source",
+        "result": "Candidate: the query string is checked only for printable ASCII and forwarded, so Google's system query parameters key=, userProject= and quotaUser= (documented equivalents of the refused headers) reach Cloud Code with the owner's bearer token. Upstream honoring is not source-visible, so needs_validation.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/stream.rs",
+          "src/scrub.rs"
+        ],
+        "invariant": "Every reply header and body byte streamed to the caller passes the echo scrub for the access token and, for logins, the refresh token, before the head and across chunk boundaries",
+        "method": "source",
+        "result": "Holds for the stream path: response header values are checked with contains_any against needles_of(watched) before the head is written; body pieces go through StreamScrub::push; the held tail is released only on non-echo, non-cancel ends. Scrub internals are peer-owned.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/audit.rs",
+          "src/stream.rs"
+        ],
+        "invariant": "Caller-supplied method, path and rule-mismatch text cannot inject into the audit log or the caller's reply framing",
+        "method": "source",
+        "result": "Holds: audit lines are serde_json-encoded (src/audit.rs line 184), the method is truncated to 16 characters and the path to 200; StreamHead and StreamTrailer are serde_json lines and body chunks are length-prefixed, so upstream bytes cannot forge a trailer.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "src/kinds.rs:GOOGLE_AI_LOGIN:query-system-parameters-unrefused"
+    ],
+    "unresolved": [],
+    "planned_hunter": "hunter-stream",
+    "hardening_notes": [
+      "src/rules.rs check_caller_headers does not refuse method or path override headers (x-http-method-override, x-http-method, x-method-override, x-original-url, x-rewrite-url); the stream kind and rule method/path binding (and the proxy, which shares the function) relies on each upstream not honoring them. Refusing them costs nothing.",
+      "src/logins.rs line 615 computes now + expires_in as u64 with unchecked addition; a token-server reply with a huge expires_in saturates the cast to u64::MAX and the addition overflows (abort in a dev build with panic = abort, wrap in release). The token server is a fixed TLS host, so a socket caller cannot reach it; use saturating_add and cap the expiry.",
+      "A socket caller that provokes an upstream 401 on a claimed login forces a renewal on every call (the 401 path passes early = false, bypassing early_gap_secs), and a second 401 marks the version Refused so upkeep stops; same-UID self-impact under the accepted trade-off, noted only because it spends refresh-token rotations."
+    ],
+    "validation_decisions": {
+      "src/kinds.rs:GOOGLE_AI_LOGIN:query-system-parameters-unrefused": "needs_validation"
+    }
+  },
+  {
+    "coverage_id": "src%2Fprotocol.rs%23op%20wallet-create::src%2Fvault.rs%23set_wallet_caps::src%2Fevm.rs::MEMORY-SAFETY-AND-BINARY.md%23Bounds%2C%20integer%2C%20and%20representation%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/protocol.rs#op wallet-create",
+      "boundary": "src/vault.rs#set_wallet_caps",
+      "subsystem": "src/evm.rs",
+      "attack_class": "MEMORY-SAFETY-AND-BINARY.md#Bounds, integer, and representation attack classes"
+    },
+    "surface": "wallet-create, wallet-caps and transaction encoding",
+    "boundary": "recovery key gate; chain encoders and address parsing",
+    "subsystem": "src/evm.rs",
+    "attack_class": "Bounds, integer, and representation attack classes",
+    "starting_paths": [
+      "src/evm.rs",
+      "src/solana.rs",
+      "src/tron.rs",
+      "src/wallet.rs",
+      "src/vault.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Cryptography and secrets",
+    "selected_companion_blocks": [
+      "MEMORY-SAFETY-AND-BINARY.md#Core discipline",
+      "MEMORY-SAFETY-AND-BINARY.md#Bounds, integer, and representation attack classes",
+      "MEMORY-SAFETY-AND-BINARY.md#Universal moves",
+      "MEMORY-SAFETY-AND-BINARY.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "MEMORY-SAFETY-AND-BINARY.md#Kernel and privileged-interface attack classes",
+        "reason": "no kernel code"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-wallet",
+    "reviewed_paths": [
+      "src/evm.rs",
+      "src/secret.rs",
+      "src/solana.rs",
+      "src/tron.rs",
+      "src/vault.rs",
+      "src/wallet.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/wallet.rs"
+        ],
+        "invariant": "wallet-create and wallet-caps accept caps only with the recovery key and only within Caps::validate's bounds for the wallet's chain.",
+        "method": "source",
+        "result": "create_wallet and set_wallet_caps (src/vault.rs:590-670) run check_recovery_key (public half of the typed age identity equals the stored recipient; a parse failure is a mismatch) before any change, then Caps::validate (src/wallet.rs:284-312): per_payment <= daily <= $1,000,000, other chains' fee caps must be zero, fee caps bounded. Serde rejects negative or fractional u64 values. Spends survive a caps change.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/wallet.rs"
+        ],
+        "invariant": "Amount parsing and unit conversion cannot overflow, truncate or change sign between the caller's decimal, the counted micros and the encoded on-chain units.",
+        "method": "source",
+        "result": "parse_amount (src/wallet.rs:598-615) accepts ASCII digits only, at most 24 whole digits and <= decimals places, with checked_mul/checked_add into u128 (max 10^30 < 2^128). to_micros uses u64::try_from and maps failure to over_cap; micros is then bounded by per_payment. The same u128 units go to the EVM/Tron uint256 call data (16 zero bytes + 16-byte big-endian) and Solana u64 via try_from; decide and record use the same units for replacement matching. Zero amount refused.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/wallet.rs",
+          "src/solana.rs",
+          "src/tron.rs"
+        ],
+        "invariant": "Fee arithmetic cannot wrap to a small value that passes the daily fee cap.",
+        "method": "source",
+        "result": "EVM worst fee is computed in u128 and saturates to u64::MAX (src/wallet.rs:510, 1084); with validated caps it is at most 1.5e18 wei. Solana priority fee is u128 with div_ceil and try_from saturation (src/solana.rs:161-164), worst fee uses saturating_add. Tron bandwidth uses saturating_mul/add (src/tron.rs:188-190). spent() and decide use saturating_add. raise() uses u128 and max(fee+1) saturating.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/evm.rs",
+          "src/tron.rs",
+          "src/solana.rs"
+        ],
+        "invariant": "Chain encoders (RLP, protobuf, Solana message) and address parsers produce the bytes the vault checked and cannot be steered by caller-controlled lengths or encodings.",
+        "method": "source",
+        "result": "RLP integers strip leading zeros, lengths >= 56 use long form (src/evm.rs:140-169); all lengths are vault-built constants (data 68 bytes or empty). EVM addresses require 0x + 40 hex and an EIP-55 match when mixed case; Tron addresses require 25 bytes, 0x41 prefix and a matching double-sha256 checksum; Solana addresses decode to exactly 32 bytes and are re-encoded canonically before comparison and storage. Solana's message refuses duplicate accounts (recipient colliding with owner, its token accounts or programs) before anything is counted (src/solana.rs:187-191, src/wallet.rs:820). parse_block_id requires 64 hex digits whose first 8 bytes equal the block number. No index or slice depends on a caller length.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-wallet",
+        "reviewed_paths": [
+          "src/evm.rs",
+          "src/solana.rs",
+          "src/secret.rs"
+        ],
+        "invariant": "Wallet keys come from the OS CSPRNG, are valid for the curve, and every signature is verified against the stored address before it leaves.",
+        "method": "source",
+        "result": "SecretValue::random uses getrandom (src/secret.rs:34-38); evm::new_key retries until SigningKey::from_slice accepts the scalar (src/evm.rs:35-43); Solana seeds are any 32 bytes. sign_digest is RFC 6979, low-s normalized, and recovers the signer and compares its address with the record's (src/evm.rs:209-226); solana::sign checks the public key equals owner and verifies the signature (src/solana.rs:239-257). A key of the wrong length is reported as a corrupt vault file, never used.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-wallet",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Fproxy.rs%23send%20reply::src%2Fscrub.rs%23needles::src%2Fscrub.rs::ATTACK-CLASSES.md%23Feature%20abuse%20and%20data%20leakage",
+    "canonical_refs": {
+      "surface": "src/proxy.rs#send reply",
+      "boundary": "src/scrub.rs#needles",
+      "subsystem": "src/scrub.rs",
+      "attack_class": "ATTACK-CLASSES.md#Feature abuse and data leakage"
+    },
+    "surface": "proxy reply returned to the caller",
+    "boundary": "echo scrub of the key in reply headers and body (R12)",
+    "subsystem": "src/scrub.rs",
+    "attack_class": "Feature abuse and data leakage",
+    "starting_paths": [
+      "src/proxy.rs",
+      "src/scrub.rs",
+      "src/server.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Feature abuse and data leakage",
+    "selected_companion_blocks": [
+      "WEB-PROTOCOL-AND-AUTH.md#Core discipline",
+      "WEB-PROTOCOL-AND-AUTH.md#API-key and mTLS attack classes",
+      "WEB-PROTOCOL-AND-AUTH.md#Universal moves",
+      "WEB-PROTOCOL-AND-AUTH.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#MFA, passkey, and account-transition attack classes",
+        "reason": "not on this path"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-proxy",
+    "reviewed_paths": [
+      "Cargo.toml",
+      "src/proxy.rs",
+      "src/scrub.rs",
+      "src/server.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-proxy",
+        "reviewed_paths": [
+          "src/proxy.rs",
+          "src/scrub.rs",
+          "src/server.rs"
+        ],
+        "invariant": "No reply byte reaches the caller before the whole body and every header value are checked for raw, base64 (4 variants), hex (2 cases) and percent-encoded (2 cases) forms of the key.",
+        "method": "source",
+        "result": "proxy::send reads the full body (bounded at 10 MiB + 1), refuses any non-identity Content-Encoding header, and runs contains_any over body and every lossy-UTF-8 header value before returning; on a match it returns EchoBlocked with no status, header or body; server.rs:1483-1498 serializes only the checked reply. Lossy header conversion only replaces non-UTF-8 bytes, so the checked text equals the returned text. Error strings are fixed (describe_send_error).",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-proxy",
+        "reviewed_paths": [
+          "src/proxy.rs",
+          "Cargo.toml"
+        ],
+        "invariant": "The scrub sees the bytes the caller will decode (no transparent compression).",
+        "method": "source",
+        "result": "reqwest is built without gzip/brotli/deflate features (Cargo.toml:58,61), accept-encoding is forced to identity and refused from callers, te refused, and a Content-Encoding other than identity is refused (proxy.rs:112-114).",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-proxy",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Fserver.rs%23Request%3A%3ARestore::src%2Fbackup.rs%23write_and_verify::src%2Fbackup.rs::DATA-ISOLATION-AND-LIFECYCLE.md%23Export%2C%20backup%2C%20restore%2C%20and%20migration%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/server.rs#Request::Restore",
+      "boundary": "src/backup.rs#write_and_verify",
+      "subsystem": "src/backup.rs",
+      "attack_class": "DATA-ISOLATION-AND-LIFECYCLE.md#Export, backup, restore, and migration attack classes"
+    },
+    "surface": "backup, restore, reset, confirm-kit, read-backup, mirror",
+    "boundary": "recovery key proof, check key, generation and vault id binding",
+    "subsystem": "src/backup.rs",
+    "attack_class": "Export, backup, restore, and migration attack classes",
+    "starting_paths": [
+      "src/backup.rs",
+      "src/vault.rs",
+      "src/mirror.rs",
+      "src/server.rs",
+      "src/model.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Export, backup, restore, and migration attack classes",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Deletion, revocation, and lifecycle attack classes",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DATA-ISOLATION-AND-LIFECYCLE.md#Tenant and object-isolation attack classes",
+        "reason": "single tenant"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-store",
+    "reviewed_paths": [
+      "src/backup.rs",
+      "src/main.rs",
+      "src/mirror.rs",
+      "src/model.rs",
+      "src/server.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-store",
+        "reviewed_paths": [
+          "src/backup.rs",
+          "src/model.rs",
+          "src/mirror.rs"
+        ],
+        "invariant": "A backup or its mirrored copy discloses nothing beyond what the recovery key or the vault-file-held check key can open, and the check, intake and vault keys are never exported",
+        "method": "source",
+        "result": "write_and_verify encrypts BackupPayloadRef (format, vault_id, written_at, generation, recovery_recipient, audit_head, records) with age to two recipients: the recovery public key and the check key's public half. check_identity and intake_identity are not in the payload. The file is 0644 inside the 0700 vault-backups folder. The mirror copies ciphertext only, with write_atomic at 0600, and holds no key. read-backup returns ciphertext. The recovery public key is exposed only as SHA-256-derived identity and fingerprint values (model::vault_identity, backup::fingerprint), so nobody outside the kit or vault file can forge a backup to it. Earlier generations keep deleted secrets, which README states (`vault delete`: 'Earlier backups keep it').",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-store",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/server.rs",
+          "src/main.rs",
+          "src/backup.rs"
+        ],
+        "invariant": "reset, restore and confirm-kit require proof of the vault's recovery key, and a socket caller without it cannot remove the vault, replace its contents or change its recovery identity",
+        "method": "source",
+        "result": "confirm_kit and check_recovery_key require parse_identity(typed).public == doc.recovery_recipient. reset without a key is allowed only for is_unused (generation 1, kit unconfirmed, no records). Every change raises the generation and a restored vault is kit_confirmed, so a used vault cannot look unused. Otherwise reset requires the typed identity to match the recipient and to open the newest backup, and that backup to match the vault, before it writes the restore point and removes the key and the vault file. The server's restore refuses while a vault is open (guard.is_some()), and vault::restore refuses when a vault file or key exists. Restore requires the typed identity to decrypt the payload and to equal payload.recovery_recipient. When no vault is open, restore accepts any self-consistent backup and key pair (see hardening), but only a same-UID caller can reach that state, and the architecture already treats such a caller as able to read the vault key.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-store",
+        "reviewed_paths": [
+          "src/backup.rs",
+          "src/vault.rs"
+        ],
+        "invariant": "Backup verification and the backup gate (R19) fail closed: a change after a failed or mismatched backup is refused, and an existing backup for a generation is compared, not trusted",
+        "method": "source",
+        "result": "write_and_verify either decrypts an already-written file for this generation with the check key and compares it through matches_doc, or writes, rereads, decrypts and compares the new file byte for byte. A failure sets last_backup.ok=false, and ready_for_change then refuses every change except renew, which is documented as deliberate. same_records compares ids, versions, names, kinds, sites, rules, usernames, totp, expiry, handover, app, leasable, wallet and value, and the ids are unique by check_ids. No path accepts an unverified backup as good.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-store",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Fserver.rs%23Server%3A%3Ahandle::src%2Fplatform.rs%23peer_of::src%2Fserver.rs::DESKTOP-MOBILE-AND-LOCAL-IPC.md%23Local%20IPC%20and%20exported-component%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/server.rs#Server::handle",
+      "boundary": "src/platform.rs#peer_of",
+      "subsystem": "src/server.rs",
+      "attack_class": "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Local IPC and exported-component attack classes"
+    },
+    "surface": "Unix socket connection accept and per-connection peer check",
+    "boundary": "peer UID equality (SO_PEERCRED / getpeereid), 0700 socket folder, 0600 socket",
+    "subsystem": "src/server.rs",
+    "attack_class": "Local IPC and exported-component attack classes",
+    "starting_paths": [
+      "src/server.rs",
+      "src/platform.rs",
+      "src/client.rs",
+      "src/store.rs",
+      "src/protocol.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Access control",
+    "selected_companion_blocks": [
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Core discipline",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Local IPC and exported-component attack classes",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Universal moves",
+      "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Deep-link, callback, and navigation attack classes",
+        "reason": "no deep links or URL handlers in source"
+      },
+      {
+        "block": "DESKTOP-MOBILE-AND-LOCAL-IPC.md#Webview and native-bridge attack classes",
+        "reason": "no webview in this crate"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-ipc",
+    "reviewed_paths": [
+      "src/client.rs",
+      "src/fill.rs",
+      "src/platform.rs",
+      "src/protocol.rs",
+      "src/server.rs",
+      "src/store.rs",
+      "src/wallet.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-ipc",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/platform.rs"
+        ],
+        "invariant": "Every accepted connection is refused before any request byte is read unless the kernel-recorded peer UID equals the daemon's own UID; a failed credential read drops the connection.",
+        "method": "source",
+        "result": "Server::handle (src/server.rs:401-410) calls platform::peer_of first and returns on None; it compares peer.uid to owner_uid (getuid at start, root refused at src/server.rs:87-90) and returns after an audit line on mismatch, before read_request_line at src/server.rs:414. Linux peer_credentials (src/platform.rs:82-92) uses SO_PEERCRED and rejects a short ucred; macOS uses getpeereid (src/platform.rs:63-77). Pid and program are only copied into audit lines (with_peer, src/server.rs:304-309) and never used for a decision. No other entry reaches dispatch: run's accept loop only spawns handle or sends a fixed Busy reply (src/server.rs:201-214).",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-ipc",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/store.rs"
+        ],
+        "invariant": "The socket file and its folder are created and kept owner-only, and a stale path is replaced only when it is a socket inside an owner-checked 0700 folder (no world-writable socket path, no symlink following).",
+        "method": "source",
+        "result": "The daemon sets umask 077 before anything (src/server.rs:93), makes the socket folder 0700 when absent (src/server.rs:102-106), and check_dir refuses a symlink, a non-owner folder or any group/other bit on the vault, backups and socket folders (src/server.rs:107-109, src/store.rs:232-253). The Linux runtime folder /run/user/<uid> is used only when it is a real directory owned by the uid (src/store.rs:137-141), else the 0700 base/socket folder. An existing path is removed only if lstat says socket, otherwise start fails (src/server.rs:124-133); bind then chmod 0600 (src/server.rs:134-137) happens inside the already-checked 0700 folder, so no other OS user can race the path.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-ipc",
+        "reviewed_paths": [
+          "src/client.rs",
+          "src/store.rs",
+          "src/platform.rs"
+        ],
+        "invariant": "The command-line tool sends a request (which may carry a typed value or the recovery key) only to a daemon whose kernel-reported peer UID is its own, so a socket planted by another user cannot collect it.",
+        "method": "source",
+        "result": "connect_verified (src/client.rs:41-56) checks the socket folder with check_dir, lstats the socket as a socket owned by the caller, connects, and then checks peer_uid equals getuid, returning DaemonNotVerified otherwise; the post-connect kernel check closes the path-check TOCTOU. exchange writes the request only after connect_verified (src/client.rs:65-74). parse requires the reply to echo the fresh random request id (src/client.rs:58-63, 84-94), so a reply cannot be attributed to another request on the one-request-per-connection channel.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-ipc",
+        "reviewed_paths": [
+          "src/protocol.rs",
+          "src/server.rs",
+          "src/fill.rs",
+          "src/wallet.rs"
+        ],
+        "invariant": "No request field selects another principal, user or capability: caller-declared identity fields are labels only, and channel identity (UID) is the sole authorization at the socket, consistent with the source-stated design that every same-UID agent may make every request.",
+        "method": "source",
+        "result": "The only caller-identity-like fields are on_behalf_of, engine, tab (fill, sign, sign-cancel) and lease's job; on_behalf_of is length-bounded and goes to the audit line only (src/fill.rs:31, src/fill.rs:97-107, src/wallet.rs:75, src/wallet.rs:587), and no branch of dispatch reads it for a decision. The envelope's request_id is echoed only (src/server.rs:278-284). Per-resource gates that do exist (recovery key for caps, wallet-create and reset; fill origin; lease leasable flag) are owned by peer units. Same-UID access to every op is the accepted trade-off at src/protocol.rs:3-4, not a boundary crossing.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-ipc",
+    "hardening_notes": [
+      "src/install.rs:68-74 ensure_dir calls create_dir_all with the process umask and then chmods 0700, and follows a symlink in both steps. Create the folder with DirBuilder::mode(0o700) and verify it with store::check_dir (lstat, owner, no 077 bits) as the daemon does. That closes the short window in which a new folder has the default mode, and stops a planted symlink from being chmodded and used.",
+      "src/install.rs:82-96 install_program reads the executable by its path twice (once to compare, once to copy) after it has started. Read it once from one opened descriptor (or /proc/self/exe on Linux) so the bytes installed are the bytes compared and running.",
+      "src/server.rs:107-109 the daemon runs check_dir on the vault, backups and socket folders but not on base, bin/ (which holds the program the service runs) or the log folder. Adding them would catch a folder whose mode was loosened after install.",
+      "src/platform.rs:82-92 SO_PEERCRED reports the peer's UID as seen from the daemon's user namespace. A rootless container whose root maps to the owner's UID and has the socket bind-mounted would pass the check. Whether containers can reach the socket at all is up to the host (README says they cannot), so this is a deployment note, not a finding."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fserver.rs%23Server%3A%3Arenew_login::src%2Fkinds.rs%23Refresher::src%2Flogins.rs::WEB-PROTOCOL-AND-AUTH.md%23Federated-identity%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/server.rs#Server::renew_login",
+      "boundary": "src/kinds.rs#Refresher",
+      "subsystem": "src/logins.rs",
+      "attack_class": "WEB-PROTOCOL-AND-AUTH.md#Federated-identity attack classes"
+    },
+    "surface": "token renewal, import_login, claim_refresh",
+    "boundary": "fixed token servers, claim handover, version check",
+    "subsystem": "src/logins.rs",
+    "attack_class": "Federated-identity attack classes",
+    "starting_paths": [
+      "src/logins.rs",
+      "src/kinds.rs",
+      "src/vault.rs",
+      "src/server.rs",
+      "src/health.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "WEB-PROTOCOL-AND-AUTH.md#Core discipline",
+      "WEB-PROTOCOL-AND-AUTH.md#Federated-identity attack classes",
+      "WEB-PROTOCOL-AND-AUTH.md#Universal moves",
+      "WEB-PROTOCOL-AND-AUTH.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#Browser-session attack classes",
+        "reason": "no browser session"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-stream",
+    "reviewed_paths": [
+      "src/kinds.rs",
+      "src/logins.rs",
+      "src/server.rs",
+      "src/stream.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/kinds.rs",
+          "src/logins.rs",
+          "src/stream.rs"
+        ],
+        "invariant": "Renewal requests go only to the kind's fixed token server over HTTPS, with no redirect and no environment proxy, never to a caller-named host",
+        "method": "source",
+        "result": "Holds: RefreshCall host and path are static constants in logins.rs; Streamer::refresh builds https://host+path on the shared client (redirect none, no_proxy, https_only); the test_upstream override exists only under the test-upstream feature.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/logins.rs"
+        ],
+        "invariant": "Stored refresh tokens and ids cannot inject into the JSON or form refresh body or the stored login object",
+        "method": "source",
+        "result": "Holds: check_token refuses non-graphic bytes, quote and backslash before raw embedding in the Codex JSON body and in to_value; Grok and Google bodies use form_urlencoded::byte_serialize; ids go through serde_json; StoredWire has deny_unknown_fields and serde rejects duplicate fields.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/logins.rs"
+        ],
+        "invariant": "Token-server replies are consumed safely: only a validated access token, an optional rotated refresh token and an expiry are taken; error bodies never reach messages",
+        "method": "source",
+        "result": "Holds: TokenReplyWire fields are SecretValue and checked with check_token; refusal and google_refusal keep only a short [A-Za-z0-9_.-] OAuth code; DEAD_GRANT or invalid_grant alone decide CredentialRefused. JWT payloads are decoded without verification only for exp and a Codex account-id fallback, used for scheduling and a header value, not an identity decision; the vault is an OAuth client, not a relying party, so no iss/aud binding is owed.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/vault.rs"
+        ],
+        "invariant": "One renewal per login and version: a spent refresh token is never sent twice, and a renewal never overwrites a newer sign-in",
+        "method": "source",
+        "result": "Holds: renew_login takes a per-id lock, re-reads the snapshot and returns without sending when record.version != seen; Vault::renew rejects a version change with VersionMismatch, which the server drops in favor of the new sign-in. put_as and import_login refuse a kind change under the same name, so the stream retry loop's reused plan always matches the record's kind.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/vault.rs",
+          "src/server.rs"
+        ],
+        "invariant": "Handover state machine: an imported login is never renewed until claim_refresh at the exact imported version, and a claimed login cannot be overwritten by an older auth.json import",
+        "method": "source",
+        "result": "Holds: import_login stores Handover{claimed:false} and renewable() returns None while unclaimed; claim_refresh requires record.version == version and bumps the version; import_login on a claimed record with a different digest returns LoginClaimed; an unchanged digest returns Unchanged without a write.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-stream",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/kinds.rs"
+        ],
+        "invariant": "Back-off and refusal: a failed renewal is not retried within RENEW_RETRY, a refused version is not renewed again, and the 401 retry happens once per call",
+        "method": "source",
+        "result": "Holds: the last_renewal gate, renewable() consulting the health book for Refused at this version, and renewed_after_401 limiting the retry to one per call.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-stream",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Fserver.rs%23log::src%2Fsecret.rs%23SecretValue::src%2Ferror.rs::ATTACK-CLASSES.md%23Feature%20abuse%20and%20data%20leakage",
+    "canonical_refs": {
+      "surface": "src/server.rs#log",
+      "boundary": "src/secret.rs#SecretValue",
+      "subsystem": "src/error.rs",
+      "attack_class": "ATTACK-CLASSES.md#Feature abuse and data leakage"
+    },
+    "surface": "every log, error, audit and reply path",
+    "boundary": "SecretValue has no Debug/Display/Serialize; fixed error strings (R1, R2, R4)",
+    "subsystem": "src/error.rs",
+    "attack_class": "Feature abuse and data leakage",
+    "starting_paths": [
+      "src/error.rs",
+      "src/secret.rs",
+      "src/server.rs",
+      "src/main.rs",
+      "src/report.rs",
+      "src/audit.rs",
+      "src/protocol.rs",
+      "src/details.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Feature abuse and data leakage",
+    "selected_companion_blocks": [],
+    "excluded_blocks": [
+      {
+        "block": "MEMORY-SAFETY-AND-BINARY.md#Binary loading and runtime attack classes",
+        "reason": "covered by the memory unit"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-leak",
+    "reviewed_paths": [
+      "src/audit.rs",
+      "src/details.rs",
+      "src/error.rs",
+      "src/intake.rs",
+      "src/logins.rs",
+      "src/main.rs",
+      "src/model.rs",
+      "src/protocol.rs",
+      "src/proxy.rs",
+      "src/report.rs",
+      "src/rules.rs",
+      "src/secret.rs",
+      "src/server.rs",
+      "src/stream.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-leak",
+        "reviewed_paths": [
+          "src/secret.rs",
+          "src/model.rs",
+          "src/protocol.rs"
+        ],
+        "invariant": "SecretValue cannot be printed, cloned or serialized into a reply (R1, R4)",
+        "method": "source",
+        "result": "SecretValue has only a Debug impl that prints [secret], no Display, Clone or Serialize; expose() is pub(crate). Serialization of values happens only through model::secret_bytes on crate-private VaultDoc/Record (vault file, backups) and the client's SecretRequest. Every reply struct in protocol.rs carries summaries, codes or ciphertext only; the compiler rejects a SecretValue field in a Serialize reply.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-leak",
+        "reviewed_paths": [
+          "src/error.rs",
+          "src/server.rs",
+          "src/protocol.rs",
+          "src/details.rs",
+          "src/logins.rs",
+          "src/intake.rs"
+        ],
+        "invariant": "Error text never quotes a secret value (R2): serde and parser errors over secret-bearing input are replaced with fixed strings",
+        "method": "source",
+        "result": "parse_request errors are discarded at src/server.rs:429-436 for a fixed BadRequest; details.rs:64, logins.rs:223/301/357/437/595, intake.rs:109 and store.rs:325 all map serde errors to fixed messages. Token-server refusals (logins.rs:665-689) pass only a status and an OAuth error code filtered to <=64 [A-Za-z0-9_.-]. Formatted VaultError strings carry names, paths, rule fields, caller host/method/path-without-query, field names and counts, never value bytes. From<io::Error> carries the io error text only.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-leak",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/audit.rs",
+          "src/proxy.rs",
+          "src/rules.rs",
+          "src/stream.rs"
+        ],
+        "invariant": "Audit lines and daemon log lines carry no value and no caller query string",
+        "method": "source",
+        "result": "Proxy and stream audit events log path.split(['?','#']).next() truncated to 200 chars (src/server.rs:1140, 1424); RuleMismatch/BadRequest details are built from the query-stripped path (proxy::check splits the query before check_against_rule; stream uses path_only). describe_send_error (src/proxy.rs:152) drops reqwest's URL-bearing message. server::log calls print error codes, names, versions and paths only. No unwrap/expect/dbg! over secret-bearing Results that could print bytes into the daemon log on abort.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-leak",
+        "reviewed_paths": [
+          "src/main.rs",
+          "src/report.rs"
+        ],
+        "invariant": "The CLI never prints a value it read or received, and never takes one from argv or the environment",
+        "method": "source",
+        "result": "read_hidden (src/main.rs:285-297) reads from a hidden prompt or stdin into a SecretValue and zeroizes the String; report.rs ErrorJson uses code() and Display only; printed replies are summaries.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-leak",
+    "hardening_notes": [
+      "src/store.rs:279 and src/backup.rs:164-166 build the whole plaintext vault document with serde_json::to_vec, which starts small and grows by reallocation; Zeroizing wipes only the final buffer, so each save and backup leaves freed heap fragments holding every secret (as decimal byte arrays). backup::plaintext_size already counts the exact size with a ByteCounter: pre-size a Zeroizing Vec with that count and use serde_json::to_writer, as client::call_secret does.",
+      "serde_json copies any JSON string that contains an escape into its own Deserializer scratch Vec, which is dropped unwiped. This reaches secret_bytes::deserialize for intake's value (src/intake.rs:76-78, documented as 'read straight into a wiping buffer'), stored personal details (src/details.rs:64; an address with a line break is always escaped) and string-form request values. Either require the byte-array form for secret fields or note the residue in R1.",
+      "src/client.rs:130 pre-sizes the outgoing secret request at 128 KiB, but secret_bytes serializes a value as a JSON number array (up to 4 bytes per byte), so a value over about 32 KiB reallocates and leaves an unwiped copy in the CLI's freed heap; size it from value.len()*4 plus overhead.",
+      "src/main.rs:292-295 reads a stdin value with read_to_string into a growing String and then trim_end_matches(..).to_string() makes a second unwiped-on-drop copy before from_string; only the first String is zeroized, and its earlier reallocations are not. Read into a WipingBuf instead.",
+      "SecretValue::lock/Drop (src/secret.rs:101-109, 155-163) call mlock/munlock per allocation, but page locks don't nest: dropping one SecretValue munlocks the whole page, unlocking any other live SecretValue sharing it. On Linux with unencrypted swap a live secret can then be paged out. Either mlock nothing (as macOS's comment already assumes encrypted swap) or allocate secrets from a dedicated locked arena.",
+      "HeaderValue::from_bytes (src/proxy.rs:144, src/stream.rs:486) copies the credential into a non-zeroized Bytes buffer, and hyper's request encoder copies it again; set_sensitive only hides it from Debug. This is inherent to reqwest and worth naming in R1's list of unavoidable copies."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fserver.rs%23read_request_line::src%2Fprotocol.rs%23parse_request::src%2Fprotocol.rs::PROTOCOLS-RPC-AND-MESSAGING.md%23Framing%2C%20schema%2C%20and%20interpretation%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/server.rs#read_request_line",
+      "boundary": "src/protocol.rs#parse_request",
+      "subsystem": "src/protocol.rs",
+      "attack_class": "PROTOCOLS-RPC-AND-MESSAGING.md#Framing, schema, and interpretation attack classes"
+    },
+    "surface": "request line and payload framing",
+    "boundary": "2 MiB line cap, serde parse with fixed errors, envelope checks",
+    "subsystem": "src/protocol.rs",
+    "attack_class": "Framing, schema, and interpretation attack classes",
+    "starting_paths": [
+      "src/protocol.rs",
+      "src/server.rs",
+      "src/model.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Injection",
+    "selected_companion_blocks": [
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Core discipline",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Framing, schema, and interpretation attack classes",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#RPC identity and authorization attack classes",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Universal moves",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "PROTOCOLS-RPC-AND-MESSAGING.md#Broker and queue isolation attack classes",
+        "reason": "no broker"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-proto",
+    "reviewed_paths": [
+      "src/model.rs",
+      "src/protocol.rs",
+      "src/server.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-proto",
+        "reviewed_paths": [
+          "src/server.rs"
+        ],
+        "invariant": "read_request_line frames exactly one request line (first newline, at most 2 MiB) and hands only the bytes after it to read_payload, which reads exactly the declared length capped per op",
+        "method": "source",
+        "result": "The newline is searched per chunk and the first one ends the line (src/server.rs:237-245); the cap is enforced both at the newline and while accumulating (239, 247). Bytes after the newline become rest, truncated to len (264-266) and topped up with read_exact (267-272). Only restore with backup_len and stream with body_len > 0 read a payload (441-445); other ops ignore trailing bytes. JSON strings cannot hold a raw newline, so the line cannot be split inside a value. No framing disagreement found.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-proto",
+        "reviewed_paths": [
+          "src/protocol.rs",
+          "src/server.rs"
+        ],
+        "invariant": "parse_envelope and parse_request decode the same line consistently (duplicate, unknown and escaped fields), and the envelope cannot change which operation, principal or resource the handler acts on",
+        "method": "source",
+        "result": "Both passes use serde_json over the same bytes with derived structs (src/protocol.rs:179-214, 406-829); derived structs reject duplicate keys, so a duplicated op, name, id or protocol is a parse error in every pass, not a precedence choice. Unknown fields are ignored in every pass. The envelope carries only protocol and request_id; no handler branches on envelope.protocol (no reads outside framing), and request_id is restricted to printable ASCII or a u64 and only echoed and written into JSON audit lines. One request per connection, so no reply correlation across callers.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-proto",
+        "reviewed_paths": [
+          "src/protocol.rs",
+          "src/model.rs"
+        ],
+        "invariant": "Unknown, missing and default variants fail closed: unknown op, missing name/id, ambiguous name+id, unknown Kind, sign cancel vs payment fields, reset without recovery key",
+        "method": "source",
+        "result": "Unknown op errors (src/protocol.rs:827); secret_ref requires exactly one of name/id and validates ids (645-654, src/model.rs:428-431); Kind is a closed serde enum; a cancel lists any payment or other-chain field in extra for wallet::check_cancel to refuse (734-763), and a payment requires token/to/amount (765-769). Reset with recovery_key None only proceeds when the vault is unused (src/vault.rs:1137-1146 via src/server.rs:748-766). Restore with backup_len Some(0) reads an empty payload that then fails decryption; None uses the restore point and still requires the recovery key. Parse errors reply a fixed message (src/server.rs:431-436), so serde text quoting a value never reaches the caller.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-proto",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/protocol.rs"
+        ],
+        "invariant": "Every op, including stream, restore payloads and health, passes the same peer check before parsing (no interceptor or method-path inconsistency), and caller-supplied strings reaching the stderr log or audit cannot inject records",
+        "method": "source",
+        "result": "handle() applies the peer UID check once before reading any request bytes (src/server.rs:401-410) and dispatch is the only route for every op (460-857). stderr log() receives only fixed text, error codes and record names, which validate_name limits to [A-Za-z0-9._-] (src/model.rs:462-467); audit lines are serialized as JSON (src/audit.rs:184), and mirror-report detail and lease job are stripped of control characters (src/server.rs:832, 902). No injection sink found.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-proto",
+    "hardening_notes": [
+      "src/server.rs:411 and 222-251: the 10-second read timeout applies per read(), not to the whole request line, so a caller that sends one byte every few seconds can hold a connection slot for weeks; 128 such callers hold every slot and every other caller gets busy. Only a same-UID caller can do this (and it can already kill the daemon), so this is hardening: give read_request_line an overall deadline (for example 10 s from accept, checked against an Instant before each read).",
+      "src/server.rs:269: read_payload resizes the buffer to the declared length (up to 32 MiB, zero-filled, so committed) before any byte of the payload arrives; 128 connections declaring body_len 33554432 commit about 4 GiB. Same-UID only; reading in chunks into a growing buffer would make memory follow bytes actually received.",
+      "src/server.rs:201-202: an accept() error is skipped with continue and no back-off, so under EMFILE (macOS LaunchAgents default to a 256 soft file limit; 128 callers plus their upstream sockets approach it) the accept loop spins at full CPU until descriptors free up. A short sleep on error, or raising RLIMIT_NOFILE at start, would bound it.",
+      "src/model.rs:533-535 with src/protocol.rs:401-405: secret_bytes::deserialize uses deserialize_bytes; for a JSON string value containing an escape, serde_json unescapes it into its own scratch Vec, which is not wiped, so a typed value or recovery key sent as an escaped string leaves an unwiped copy in freed memory, contrary to the parse_request comment (R1). The command-line tool sends a byte array (serialize_bytes), which takes the wiping visit_seq path, so only non-CLI callers are affected; reading the residue needs memory access that harden_process denies. Accepting only the array form, or documenting the string form as unwiped, would close the gap."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fserver.rs%23run%20accept%20loop::src%2Fserver.rs%23MAX_CONNECTIONS::src%2Fserver.rs::RESOURCE-EXHAUSTION-AND-AVAILABILITY.md%23Resource%20accumulation%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/server.rs#run accept loop",
+      "boundary": "src/server.rs#MAX_CONNECTIONS",
+      "subsystem": "src/server.rs",
+      "attack_class": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Resource accumulation attack classes"
+    },
+    "surface": "connections, payload sizes and long streams",
+    "boundary": "128-connection cap, read timeouts, payload caps",
+    "subsystem": "src/server.rs",
+    "attack_class": "Resource accumulation attack classes",
+    "starting_paths": [
+      "src/server.rs",
+      "src/stream.rs",
+      "src/backup.rs",
+      "src/protocol.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Wildcard",
+    "selected_companion_blocks": [
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Core discipline",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Resource accumulation attack classes",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Failure and recovery attack classes",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Universal moves",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Quota and scheduling attack classes",
+        "reason": "single-user daemon, no quotas by design"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-proto",
+    "reviewed_paths": [
+      "src/backup.rs",
+      "src/protocol.rs",
+      "src/server.rs",
+      "src/stream.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-proto",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/protocol.rs",
+          "src/backup.rs",
+          "src/stream.rs"
+        ],
+        "invariant": "Connection, line and payload accumulation is bounded: 128 concurrent handlers, 2 MiB line, 32 MiB restore or stream body, read and write timeouts",
+        "method": "source",
+        "result": "The accept loop counts active handlers and refuses the 129th with busy before spawning (src/server.rs:201-214), decrementing after handle returns on every path. Lines are capped at 2 MiB plus one 16 KiB chunk (222-251); payloads are refused above MAX_BACKUP_BYTES or stream::MAX_BODY, both 32 MiB (src/backup.rs:25, src/stream.rs:39, src/server.rs:256-263). Read timeout 10 s per read for the line, 60 s for payload reads, 30 s write timeout (411-412, 267). The bounds exist; their gaps (per-read rather than total deadline, up-front 32 MiB allocation) are reachable only by a same-UID caller, which per the accepted design can already signal or kill the daemon, so they are hardening, not a crossed boundary.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-proto",
+        "reviewed_paths": [
+          "src/stream.rs",
+          "src/server.rs"
+        ],
+        "invariant": "A stream whose caller hangs up or stops reading does not leave upstream work running; long streams hold bounded state",
+        "method": "source",
+        "result": "Streamer::call races the upstream send and each chunk read against hung_up(fd) and an idle timeout clamped to 1..900 s (src/stream.rs:332-335, 377-383; src/server.rs:501); a failed write to the caller ends the loop as cancelled (394-396) and the response is dropped, closing the upstream connection. Per-stream state is a scrub tail, a 64 KiB frame and a capped error sample (373-388). Renewal calls are bounded to 30 s (292-294). No detached work or unbounded buffer found.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-proto",
+        "reviewed_paths": [
+          "src/server.rs"
+        ],
+        "invariant": "No caller input reaches a panic (panic = abort kills the whole daemon) or a lock cycle in the request path of server.rs and protocol.rs",
+        "method": "source",
+        "result": "server.rs and protocol.rs have no unwrap/expect on caller data; slices in read_request_line are within data's length (src/server.rs:242-244); mutex locks use unwrap_or_else(into_inner) and the documented order (vault before audit_check) holds in Status (626-633). Startup reads health.json and mirror.json with fallbacks to defaults (123, 635-637), so a malformed file is not a poison record. Nothing found in scope.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-proto",
+    "hardening_notes": []
+  },
+  {
+    "coverage_id": "src%2Fstore.rs%23load::src%2Fkeyprotect%2Fmod.rs%23load::src%2Fstore.rs::ATTACK-CLASSES.md%23Cryptography%20and%20secrets",
+    "canonical_refs": {
+      "surface": "src/store.rs#load",
+      "boundary": "src/keyprotect/mod.rs#load",
+      "subsystem": "src/store.rs",
+      "attack_class": "ATTACK-CLASSES.md#Cryptography and secrets"
+    },
+    "surface": "vault file and vault key at rest",
+    "boundary": "XChaCha20-Poly1305 with magic and id AAD; 0600 key file or TPM seal",
+    "subsystem": "src/store.rs",
+    "attack_class": "Cryptography and secrets",
+    "starting_paths": [
+      "src/store.rs",
+      "src/keyprotect/mod.rs",
+      "src/model.rs",
+      "src/vault.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Cryptography and secrets",
+    "selected_companion_blocks": [],
+    "excluded_blocks": [
+      {
+        "block": "DATA-ISOLATION-AND-LIFECYCLE.md#Tenant and object-isolation attack classes",
+        "reason": "single tenant"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter-store",
+    "reviewed_paths": [
+      "src/keyprotect/mod.rs",
+      "src/model.rs",
+      "src/secret.rs",
+      "src/store.rs",
+      "src/vault.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter-store",
+        "reviewed_paths": [
+          "src/store.rs",
+          "src/model.rs"
+        ],
+        "invariant": "The vault file is AEAD-sealed with a fresh random nonce per write, and the magic, format byte and vault id are authenticated so that a format downgrade, id swap or edited ciphertext fails closed",
+        "method": "source",
+        "result": "store::save draws a 24-byte XChaCha20 nonce from getrandom on every write and binds magic(format)+id as AAD. store::load rejects short or wrong-magic files, refuses formats above VAULT_FORMAT, passes the on-disk magic+id as AAD, and after decrypting requires doc.vault_id == header id and doc.format == header format before check_ids. A changed byte, id or format returns VaultFileCorrupt. There is no fallback to plaintext, and decrypted plaintext is held in Zeroizing. No key derivation, static IV or unauthenticated mode is present.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter-store",
+        "reviewed_paths": [
+          "src/keyprotect/mod.rs",
+          "src/secret.rs",
+          "src/vault.rs"
+        ],
+        "invariant": "The vault key is 32 CSPRNG bytes, kept only in a 0600 own-UID file or a systemd-creds host+tpm2 credential, and a failed unseal never falls back to a weaker or absent key",
+        "method": "source",
+        "result": "SecretValue::random uses getrandom. store_new uses create_new with mode 0600 and refuses to run when a sealed file already exists. load_file runs check_own_file (regular file, no group/other bits, owner UID) and requires exactly 32 bytes. sealed::unseal runs systemd-creds from a fixed path with a bound credential name, reads through a pipe into a fixed buffer, and requires 32 bytes. load falls back to the plain file only when that file exists (an interrupted seal holds the same key, and status reports it). seal checks the round trip before it wipes the plain file. Any same-UID process can read or unseal the key, which the architecture accepts.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [],
+    "planned_hunter": "hunter-store",
+    "hardening_notes": [
+      "src/backup.rs names backups with the generation formatted {:06} (line 184), while list/latest/prune order files lexically (lines 295, 299-301, 343-349). From generation 1,000,000 on, '1000000' sorts before '999999': latest() returns a stale generation for verify-backup, read-backup and reset, and prune deletes each new backup right after write_and_verify reports it ok. Sort by the parsed generation (generation_of) instead of the file name. Only reachable after about a million changes, so not a finding.",
+      "Rollback of vault.bin is not detected. The vault key never rotates and the AAD (magic+id) carries no generation, so an older vault.bin decrypts. audit::check accepts any earlier head still in the chain, and needs_backup passes because that generation's backup matches. The next commit then finds the existing future backup for N+1, fails with BackupMismatch, and ready_for_change refuses all later changes. Only a same-UID writer can do this. Checking doc.generation against the newest local backup's generation at open would turn this into a clear alarm.",
+      "vault::restore (src/vault.rs restore) accepts any backup whose payload.recovery_recipient matches the typed identity, and it does not bind to the recovery recipient of the restore point that `vault reset` left. It also does not re-validate restored records (validate_name, rule parse, caps.validate, kind/field consistency). While no vault is open (after reset, or after `install --for-restore`), a same-UID process can install a vault under its own recovery key first. Binding a file restore to the recipient recorded beside the restore point, and re-running record validation on restore, would close this. It is not a finding because the attacker is same-UID.",
+      "Audit chain (src/audit.rs): with an unkeyed chain and the head saved only at changes, a same-UID writer can drop use lines written after the last change without detection. The incremental check() also only reads past the checkpoint offset of the current audit.log, so an in-place edit of an already-checked line shows up only at the next daemon start or `vault audit --all`. Both are within the accepted same-UID trade-off. Recording a periodic head, or stamping the current file's checked prefix, would narrow them.",
+      "keyprotect::load falls back to the plain vault.key when unsealing the TPM credential fails and both files exist (an interrupted seal). Status reports it, but a disk copy taken in that state opens the vault anywhere. Finishing or retrying the seal at daemon start would shorten that window."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fstream.rs%23Streamer%3A%3Arun%20reply%20classification::src%2Fserver.rs%23renewable::src%2Fhealth.rs::RESOURCE-EXHAUSTION-AND-AVAILABILITY.md%23Failure%20and%20recovery%20attack%20classes",
+    "canonical_refs": {
+      "surface": "src/stream.rs#Streamer::run reply classification",
+      "boundary": "src/server.rs#renewable",
+      "subsystem": "src/health.rs",
+      "attack_class": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Failure and recovery attack classes"
+    },
+    "surface": "src/stream.rs#Streamer::run upstream reply classification",
+    "boundary": "src/server.rs#renewable (health book Refused gate on renewal)",
+    "subsystem": "src/health.rs",
+    "attack_class": "Failure and recovery attack classes",
+    "starting_paths": [
+      "src/kinds.rs",
+      "src/stream.rs",
+      "src/server.rs",
+      "src/health.rs",
+      "src/logins.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Core discipline",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Failure and recovery attack classes",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Universal moves",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Quota and scheduling attack classes",
+        "reason": "single-user daemon, no quotas by design"
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 2,
+    "status": "candidate",
+    "agent_id": "hunter2-lifecycle",
+    "reviewed_paths": [
+      "src/health.rs",
+      "src/kinds.rs",
+      "src/server.rs",
+      "src/stream.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter2-lifecycle",
+        "reviewed_paths": [
+          "src/stream.rs",
+          "src/server.rs",
+          "src/kinds.rs",
+          "src/health.rs"
+        ],
+        "invariant": "The health book's Refused gate on renewal is set only when the credential is actually dead, not by a caller-shaped request",
+        "method": "source",
+        "result": "Any 401 on a login stream is held (stream.rs:344), renewed with early=false and retried (server.rs:1209-1214). A second 401 records Refused for the new version (server.rs:1231), which disables upkeep and pre-call renewal through renewable() (server.rs:1271) until a 2xx at that version (health.rs:55-57). Caller path, body and pass-through headers (kinds.rs:189 for Grok) shape that request. Whether a caller can make the upstream answer 401 with a valid token, and whether the host relays such input from container agents, is outside the repository: candidate needs_validation.",
+        "artifact": null
+      },
+      {
+        "agent_id": "hunter2-lifecycle",
+        "reviewed_paths": [
+          "src/server.rs",
+          "src/health.rs"
+        ],
+        "invariant": "Retry and recovery are bounded: renewal failures back off, a Refused login is not retried, and the health book cannot keep the daemon from starting",
+        "method": "local",
+        "result": "RENEW_RETRY back-off follows a failed renewal (server.rs:1310), and the early-gap throttle follows a successful one only for early calls (server.rs:1315-1319). The 401 path retries exactly once (renewed_after_401). The probe showed that a Refused entry at version 1 does not gate version 2 (state_of(v2) = None), so a version bump from rename lifts the gate and allows one more attempt with a dead refresh token, which is bounded. HealthBook::from_json falls back to an empty book on a malformed health.json (health.rs:33), so there is no poison record at startup. prune keeps the book to existing ids.",
+        "artifact": "agents/hunter2-lifecycle/artifacts/out.txt"
+      }
+    ],
+    "result_fingerprints": [
+      "src/server.rs:stream:caller-induced-401-marks-login-refused"
+    ],
+    "unresolved": [],
+    "planned_hunter": "hunter2-lifecycle",
+    "critic_reason": "The resource unit selected Failure and recovery but checked only panics and lock order. No unit checked whether caller-influenced upstream replies can poison the sticky health state that gates renewal. src/stream.rs:387-388 and :428 hand up to 16 KiB of an error body to the kind's classifier. src/kinds.rs:262-307 decides Refused by case-insensitive substring: 'oauth' or 'token' anywhere in an Anthropic 403, or 'permission_denied' plus 'terms of service' anywhere in a Google 403. src/server.rs:1252-1254 records the result, and src/server.rs:1231 marks Refused after a renewed retry still gets a 401. src/health.rs:55-57 keeps Refused for that version until a 2xx. src/server.rs:1271 then stops renewal, so the login dies at expiry. The caller picks the path, query, headers and body on the fixed host (see the open google_ai_login query candidate), and the book is persisted to health.json and read back at start (src/server.rs:123, :1382-1388). A hunter should check whether a relayed agent can steer the classification and whether recovery needs a new sign-in.",
+    "hardening_notes": [],
+    "validation_decisions": {
+      "src/server.rs:stream:caller-induced-401-marks-login-refused": "needs_validation"
+    }
+  }
+]
