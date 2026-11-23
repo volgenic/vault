@@ -58,6 +58,27 @@ pub const REFUSED_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
+/// Headers that ask a server or a gateway in front of it to use another method, path or host than
+/// the request line's (Rack, Symfony, Laravel, IIS, Google's front end, Envoy). The vault checks
+/// the request line against the key's rule, so a caller may never send one of these: an upstream
+/// that honours it would act outside the rule (security audit run 1, lead 1). `x-forwarded-*`
+/// (`x-forwarded-path`, `x-forwarded-prefix`, `x-forwarded-host`) is refused by its prefix.
+pub const OVERRIDE_HEADERS: &[&str] = &[
+    "x-http-method-override",
+    "x-http-method",
+    "x-method-override",
+    "x-original-method",
+    "x-original-url",
+    "x-original-uri",
+    "x-original-path",
+    "x-rewrite-url",
+    "x-rewrite-uri",
+    "x-override-url",
+    "x-envoy-original-path",
+    "x-original-host",
+    "x-host",
+];
+
 /// Builds and checks a rule from what the person typed into `vault add`.
 pub fn parse_rule(
     host: &str,
@@ -184,14 +205,83 @@ fn check_path(path: &str) -> Result<(), VaultError> {
     if path.contains("//") {
         return bad("no empty segments");
     }
+    // Security audit run 1, lead 2: an upstream that decodes twice, or drops `;` parameters
+    // before resolving dot segments (`/v1/public/..;/admin`), would route outside the rule's
+    // prefix. The rule is matched on the vault's view of the path, so these forms are refused.
+    if path.contains(';') {
+        return bad("no ; path parameters (a server may drop them and resolve what's left, like ..;)");
+    }
     let lower = path.to_ascii_lowercase();
-    for encoded in ["%2f", "%5c", "%2e", "%00"] {
+    if lower.contains("%25") {
+        return bad("no %25 (an encoded %, which double-encodes what follows)");
+    }
+    for encoded in ["%2f", "%5c", "%2e", "%00", "%3b"] {
         if lower.contains(encoded) {
-            return bad("no encoded slash, backslash, dot or NUL");
+            return bad("no encoded slash, backslash, dot, semicolon or NUL");
         }
     }
-    if path.split('/').any(|segment| segment == "." || segment == "..") {
-        return bad("no . or .. segments");
+    if path.split('/').any(|segment| is_dot_segment(segment)) {
+        return bad("no . or .. segments, in any encoding");
+    }
+    Ok(())
+}
+
+/// Whether a path segment is `.` or `..` once percent-decoded (there is no `%25` by now, so one
+/// decoding is what any server sees, however many times it decodes).
+fn is_dot_segment(segment: &str) -> bool {
+    let decoded = percent_decode(segment);
+    decoded == b"." || decoded == b".."
+}
+
+/// `%XX` decoded once; a `%` not followed by two hex digits stays as it is.
+fn percent_decode(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// A query parameter's name as a server reading it might: percent-decoded until nothing changes
+/// (a few rounds at most), lower-case, with everything but letters and digits dropped, so
+/// `userProject`, `user_project`, `$userProject` and `user%50roject` are all `userproject`.
+pub fn normalized_param_name(name: &str) -> String {
+    let mut current = name.to_string();
+    for _ in 0..4 {
+        let decoded = String::from_utf8_lossy(&percent_decode(&current)).into_owned();
+        if decoded == current {
+            break;
+        }
+        current = decoded;
+    }
+    current.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// Refuses a query that names a parameter in `refused` (normalized names, as
+/// `normalized_param_name` gives): another credential or billed project the upstream would read
+/// from the query, the way it reads a refused header (security audit run 1, lead 3). Parameters
+/// are split on `&` and `;`. The refusal names the parameter, never its value.
+pub fn check_query_params(query: Option<&str>, refused: &[&str], whose: &str) -> Result<(), VaultError> {
+    let Some(query) = query else { return Ok(()) };
+    for param in query.split(['&', ';']) {
+        let name = param.split_once('=').map_or(param, |(name, _)| name);
+        let normalized = normalized_param_name(name);
+        if refused.contains(&normalized.as_str()) {
+            return Err(VaultError::RuleMismatch(format!(
+                "query parameter {normalized:?} isn't allowed for {whose}: it names another credential or billed project"
+            )));
+        }
     }
     Ok(())
 }
@@ -276,6 +366,11 @@ pub fn check_caller_headers(
             || lower.starts_with("proxy-")
         {
             return Err(VaultError::HeaderNotAllowed(lower));
+        }
+        if OVERRIDE_HEADERS.contains(&lower.as_str()) {
+            return Err(VaultError::HeaderNotAllowed(format!(
+                "{lower} (a method, URL or host override, which could take the call outside the rule)"
+            )));
         }
         if value.len() > 8192 || value.chars().any(|c| c == '\r' || c == '\n' || c == '\0') {
             return Err(VaultError::BadRequest(format!("bad value for header {lower}")));
