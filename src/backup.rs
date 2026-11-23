@@ -161,9 +161,7 @@ pub(crate) fn write_and_verify(doc: &VaultDoc, dir: &Path) -> Result<BackupStatu
         audit_head: &doc.audit_head,
         records: &doc.records,
     };
-    let plain = Zeroizing::new(
-        serde_json::to_vec(&payload).map_err(|_| VaultError::BackupFailed("encoding".into()))?,
-    );
+    let plain = crate::secret::to_wiped_json(&payload).map_err(|_| VaultError::BackupFailed("encoding".into()))?;
 
     let recovery = age::x25519::Recipient::from_str(&doc.recovery_recipient)
         .map_err(|_| VaultError::BackupFailed("the recovery public key is malformed".into()))?;

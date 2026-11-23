@@ -106,6 +106,28 @@ impl SecretValue {
     }
 }
 
+/// Encodes `value` as JSON into a buffer sized exactly beforehand and wiped when dropped (R1).
+/// `serde_json::to_vec` starts small and grows by reallocation, leaving every value the
+/// document holds in the freed buffers; this counts the bytes first, so the one allocation is
+/// the only copy.
+pub(crate) fn to_wiped_json<T: serde::Serialize + ?Sized>(value: &T) -> Result<zeroize::Zeroizing<Vec<u8>>, serde_json::Error> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value)?;
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(count.0));
+    serde_json::to_writer(&mut *out, value)?;
+    Ok(out)
+}
+
 /// A byte buffer that never leaves an unwiped copy of its contents behind (R1). When it must
 /// grow it copies into a new allocation and wipes the old one, instead of letting `Vec`
 /// reallocate; it wipes itself when dropped. Used for request lines and secret values read off
