@@ -834,7 +834,7 @@ impl Server {
                         at: crate::now_rfc3339(),
                         ok,
                         mirror_dir: vault.mirror_dir().to_string(),
-                        newest_file: newest_file.map(|f| f.chars().take(300).collect()),
+                        newest_file: newest_file.map(|f| f.chars().filter(|c| !c.is_control()).take(300).collect()),
                         newest_generation,
                         copied,
                         already_there,
