@@ -283,8 +283,6 @@ fn reply<T: serde::Serialize>(stream: &mut UnixStream, envelope: &Envelope, valu
     stream.flush()
 }
 
-/// Who sent a request: the peer (R22, R23) and the request's envelope (its protocol version and
-/// request id).
 /// A `stream` request, read.
 struct StreamCall {
     secret: SecretRef,
@@ -296,6 +294,8 @@ struct StreamCall {
     idle: u64,
 }
 
+/// Who sent a request: the peer (R22, R23) and the request's envelope (its protocol version and
+/// request id).
 struct Caller {
     peer: Peer,
     envelope: Envelope,

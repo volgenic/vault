@@ -224,7 +224,7 @@ pub(crate) fn open(path: &Path, identity: &dyn age::Identity) -> Result<BackupPa
     open_bytes(&data, identity)
 }
 
-/// Decrypts and parses a backup held in memory, in any format this build reads (1 to 4). A
+/// Decrypts and parses a backup held in memory, in any format this build reads (`model::READABLE_FORMATS`). A
 /// format-1 backup's records have no ids yet; `vault::restore` gives them ids
 /// (`model::migrate_records`).
 pub(crate) fn open_bytes(data: &[u8], identity: &dyn age::Identity) -> Result<BackupPayload, VaultError> {

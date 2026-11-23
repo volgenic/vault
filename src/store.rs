@@ -293,7 +293,7 @@ pub(crate) fn save(paths: &Paths, key: &SecretValue, doc: &VaultDoc) -> Result<(
 }
 
 /// Reads and decrypts the vault file. Any change to the file, including its id or its format
-/// byte, fails here. Reads every format this build knows (1 to 4); an older document comes
+/// byte, fails here. Reads every format this build knows (`model::READABLE_FORMATS`); an older document comes
 /// back as it is, and the caller migrates it (`model::migrate`, `model::ensure_intake`) and writes
 /// it back in the current format.
 /// A file from a newer build is refused with `NewerFormat`, never guessed at.
