@@ -25,7 +25,7 @@ use crate::model::{Kind, SecretRef};
 use crate::platform;
 use crate::protocol::{
     self, AddReply, AuditReply, BackupCheck, BackupReply, ConfirmKitReply, ErrorReply, HealthReply, ListReply, MirrorPlanReply,
-    OkReply, Outgoing, ReadBackupReply, RenameReply, ReplyFrame, ResetReply, RestoreReply, RuleInput, SecretRequest,
+    OkReply, Outgoing, ReadBackupReply, RenameReply, ReplyFrame, SetRuleReply, ResetReply, RestoreReply, RuleInput, SecretRequest,
     StatusReply, VerifyBackupReply, WalletReply,
 };
 use crate::secret::SecretValue;
@@ -201,6 +201,21 @@ pub fn wallet_caps(
         SecretRef::Id(id) => (None, Some(id.as_str())),
     };
     call_secret(paths, &SecretRequest::WalletCaps { name, id, caps, recovery_key }, None, CHANGE_WAIT)
+}
+
+/// Changes where an API key goes: `header` or `query`, exactly one. Needs the recovery key.
+pub fn set_rule(
+    paths: &Paths,
+    secret: &SecretRef,
+    header: Option<&str>,
+    query: Option<&str>,
+    recovery_key: &SecretValue,
+) -> Result<SetRuleReply, VaultError> {
+    let (name, id) = match secret {
+        SecretRef::Name(name) => (Some(name.as_str()), None),
+        SecretRef::Id(id) => (None, Some(id.as_str())),
+    };
+    call_secret(paths, &SecretRequest::SetRule { name, id, header, query, recovery_key }, None, CHANGE_WAIT)
 }
 
 pub fn reset(paths: &Paths, recovery_key: Option<&SecretValue>) -> Result<ResetReply, VaultError> {

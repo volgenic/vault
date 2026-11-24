@@ -73,6 +73,13 @@
 //!   {"op":"wallet_create","name":"main-wallet","chain":"ethereum","caps":{...},"recovery_key":"AGE-SECRET-KEY-1..."}
 //!   {"op":"wallet_caps","name":"main-wallet","caps":{...},"recovery_key":"AGE-SECRET-KEY-1..."}
 //!
+//! **`set_rule`** (#8940) changes where an API key goes, and nothing else in its rule (host,
+//! port, methods and path stay), with the recovery key, since where the key goes is the owner's
+//! alone to set; the value never leaves the vault:
+//!   {"op":"set_rule","name":"namecheap","query":"ApiKey","recovery_key":"AGE-SECRET-KEY-1..."}
+//!   {"op":"set_rule","id":"<32 hex>","header":"X-Api-Key: {key}","recovery_key":"AGE-SECRET-KEY-1..."}
+//! It answers `{"ok":true,"secret":{...,"rule":"<the new rule>"},"was":"key in header ...","backup":{...}}`.
+//!
 //! **`sign`** (`wallet`) signs one token transfer the vault builds itself from those fields,
 //! within the wallet's caps, and answers the signed transaction and, on Ethereum, its ladder (the
 //! same transfer at rising fees, for the relay to send if the first stalls):
@@ -111,7 +118,7 @@
 //! call; the vault closes the upstream connection.
 //!
 //! For the command-line tool (R13: only the daemon changes the vault; R26):
-//!   status, audit, add, delete, rename, confirm-kit, reset, restore,
+//!   status, audit, add, delete, rename, set_rule, confirm-kit, reset, restore,
 //!   backup         write this generation's backup if it isn't written yet, and verify it
 //!   verify-backup  decrypt the newest backup with the check key and compare it
 //!   read-backup    the newest backup's encrypted bytes, for checks with the recovery key
@@ -234,7 +241,8 @@ pub struct ReplyFrame {
 }
 
 /// An API key's rule as the person typed it. The daemon parses and checks it (R7); it never
-/// takes a ready-made rule from a caller.
+/// takes a ready-made rule from a caller. Exactly one of `header` (`"Authorization: Bearer
+/// {key}"`) and `query` (a parameter's name, `"ApiKey"`, #8940) says where the key goes.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RuleInput {
     pub host: String,
@@ -242,7 +250,31 @@ pub struct RuleInput {
     pub port: Option<u16>,
     pub methods: Vec<String>,
     pub path: String,
-    pub header: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
+impl RuleInput {
+    /// The rule, checked (`rules::parse_rule`).
+    pub fn parse(&self) -> Result<crate::rules::ProxyRule, VaultError> {
+        let key = key_spec(self.header.as_deref(), self.query.as_deref())?;
+        crate::rules::parse_rule(&self.host, self.port, &self.methods, &self.path, key)
+    }
+}
+
+/// Where the key goes, from a `header` or a `query`: exactly one of them.
+pub fn key_spec<'a>(header: Option<&'a str>, query: Option<&'a str>) -> Result<crate::rules::KeySpec<'a>, VaultError> {
+    use crate::rules::KeySpec;
+    match (header, query) {
+        (Some(header), None) => Ok(KeySpec::Header(header)),
+        (None, Some(query)) => Ok(KeySpec::Query(query)),
+        (Some(_), Some(_)) => Err(VaultError::InvalidRule("give the key a header or a query parameter, not both".into())),
+        (None, None) => Err(VaultError::InvalidRule(
+            "say where the key goes: a header (\"Authorization: Bearer {key}\") or a query parameter (\"ApiKey\")".into(),
+        )),
+    }
 }
 
 /// A request, as `parse_request` reads it.
@@ -370,6 +402,13 @@ pub enum Request {
         secret: SecretRef,
         new_name: String,
     },
+    /// Where an API key goes (#8940): `header` or `query`, exactly one. Needs the recovery key.
+    SetRule {
+        secret: SecretRef,
+        header: Option<String>,
+        query: Option<String>,
+        recovery_key: SecretValue,
+    },
     ConfirmKit {
         recovery_key: SecretValue,
     },
@@ -422,6 +461,16 @@ pub fn parse_request(line: &[u8]) -> Result<Request, serde_json::Error> {
     #[derive(Deserialize)]
     struct RenameWire {
         new_name: String,
+    }
+
+    #[derive(Deserialize)]
+    struct SetRuleWire {
+        #[serde(default)]
+        header: Option<String>,
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(deserialize_with = "secret_bytes::deserialize")]
+        recovery_key: SecretValue,
     }
 
     #[derive(Deserialize)]
@@ -671,6 +720,11 @@ pub fn parse_request(line: &[u8]) -> Result<Request, serde_json::Error> {
             secret: named(line)?,
             new_name: serde_json::from_slice::<RenameWire>(line)?.new_name,
         },
+        "set_rule" => {
+            let secret = named(line)?;
+            let w: SetRuleWire = serde_json::from_slice(line)?;
+            Request::SetRule { secret, header: w.header, query: w.query, recovery_key: w.recovery_key }
+        }
         "proxy" => {
             let w: ProxyWire = serde_json::from_slice(line)?;
             Request::Proxy {
@@ -865,6 +919,19 @@ pub(crate) enum SecretRequest<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<&'a str>,
         caps: &'a crate::wallet::Caps,
+        #[serde(serialize_with = "secret_bytes::serialize_ref")]
+        recovery_key: &'a SecretValue,
+    },
+    #[serde(rename = "set_rule")]
+    SetRule {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        header: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query: Option<&'a str>,
         #[serde(serialize_with = "secret_bytes::serialize_ref")]
         recovery_key: &'a SecretValue,
     },
@@ -1323,6 +1390,15 @@ pub struct AddReply {
 pub struct RenameReply {
     pub ok: bool,
     pub secret: SecretSummary,
+    pub backup: BackupStatus,
+}
+
+/// `set_rule`'s reply: the secret (its `rule` the new one) and the placement it had before.
+#[derive(Serialize, Deserialize)]
+pub struct SetRuleReply {
+    pub ok: bool,
+    pub secret: SecretSummary,
+    pub was: String,
     pub backup: BackupStatus,
 }
 

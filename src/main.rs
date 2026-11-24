@@ -67,9 +67,12 @@ enum Command {
         /// API key: path prefix, matched on whole segments, e.g. /v1/models.
         #[arg(long, default_value = "/")]
         path: String,
-        /// API key: the header and format, e.g. "Authorization: Bearer {key}".
-        #[arg(long, default_value = "Authorization: Bearer {key}")]
-        header: String,
+        /// API key: the header and format, e.g. "Authorization: Bearer {key}" (the default).
+        #[arg(long, conflicts_with = "query")]
+        header: Option<String>,
+        /// API key: put the key in this query parameter instead of a header, e.g. ApiKey.
+        #[arg(long)]
+        query: Option<String>,
         /// Login: the username.
         #[arg(long)]
         username: Option<String>,
@@ -98,6 +101,18 @@ enum Command {
     },
     /// Rename a secret. It keeps its id, rule and value; its version goes up by one.
     Rename { name: String, new_name: String },
+    /// Change where an API key goes: another header, or a query parameter. Its host, port,
+    /// methods and path stay; its value never leaves the vault. Asks for the recovery key.
+    #[command(group = clap::ArgGroup::new("placement").required(true).args(["header", "query"]))]
+    Rule {
+        name: String,
+        /// The header and format, e.g. "Authorization: Bearer {key}".
+        #[arg(long)]
+        header: Option<String>,
+        /// The query parameter, e.g. ApiKey.
+        #[arg(long)]
+        query: Option<String>,
+    },
     /// List secrets: ids, names, kinds, sites and versions only.
     List,
     /// Whether each Claude plan's token works, has expired or was refused, by name only.
@@ -233,11 +248,12 @@ fn main() -> ExitCode {
         Command::Install { for_restore, json } => install::install(for_restore, json),
         Command::InstallMirror { yes } => install::install_mirror(yes),
         Command::ConfirmKit => confirm_kit(&paths),
-        Command::Add { name, kind, site, host, port, methods, path, header, username, app, leasable, yes } => {
-            add(&paths, name, kind, site, host, port, methods, path, header, username, app, leasable, yes)
+        Command::Add { name, kind, site, host, port, methods, path, header, query, username, app, leasable, yes } => {
+            add(&paths, name, kind, site, host, port, methods, path, (header, query), username, app, leasable, yes)
         }
         Command::Delete { name, yes } => delete(&paths, &name, yes),
         Command::Rename { name, new_name } => rename(&paths, &name, &new_name),
+        Command::Rule { name, header, query } => set_rule(&paths, &name, header, query),
         Command::Wallet { action: WalletCommand::Create { name, chain, per_payment, daily, fees } } => {
             wallet_create(&paths, &name, &chain, &per_payment, &daily, &fees)
         }
@@ -341,7 +357,7 @@ fn add(
     port: Option<u16>,
     methods: Vec<String>,
     path: String,
-    header: String,
+    (header, query): (Option<String>, Option<String>),
     username: Option<String>,
     app: Option<String>,
     leasable: bool,
@@ -375,12 +391,19 @@ fn add(
         Kind::ApiKey => {
             let host = host.ok_or_else(|| VaultError::InvalidRule("an API key needs --host".into()))?;
             let methods = if methods.is_empty() { vec!["GET".to_string()] } else { methods };
-            Some(RuleInput { host, port, methods, path, header })
+            let header = match (&header, &query) {
+                (None, None) => Some("Authorization: Bearer {key}".to_string()),
+                _ => header,
+            };
+            Some(RuleInput { host, port, methods, path, header, query })
+        }
+        _ if header.is_some() || query.is_some() => {
+            return Err(VaultError::InvalidRule("--header and --query are for --kind api-key only".into()));
         }
         _ => None,
     };
     let rule = match &rule_input {
-        Some(input) => Some(vault::rules::parse_rule(&input.host, input.port, &input.methods, &input.path, &input.header)?),
+        Some(input) => Some(input.parse()?),
         None => None,
     };
     let site = match (&site, &rule, kind.default_site(), &app) {
@@ -394,7 +417,8 @@ fn add(
     println!("Adding {} {name:?} for {site}", kind.label());
     if let Some(rule) = &rule {
         println!("  rule: {}", rule.describe());
-        println!("  the key is sent only there, only in that header; redirects are never followed");
+        let place = if rule.query_param.is_some() { "in that query parameter" } else { "in that header" };
+        println!("  the key is sent only there, only {place}; redirects are never followed");
     }
     if let Some(username) = &username {
         println!("  username: {username}");
@@ -653,6 +677,34 @@ fn rename(paths: &Paths, name: &str, new_name: &str) -> Result<(), VaultError> {
     Ok(())
 }
 
+/// `vault rule`: shows where the key goes now and where it would go, then asks for the recovery
+/// key. The daemon checks the new placement again and changes nothing else in the rule.
+fn set_rule(paths: &Paths, name: &str, header: Option<String>, query: Option<String>) -> Result<(), VaultError> {
+    let key = vault::protocol::key_spec(header.as_deref(), query.as_deref())?;
+    let placement = vault::rules::parse_placement(key)?;
+    let listed = client::list(paths)?;
+    let secret = listed.secrets.iter().find(|secret| secret.name == name).ok_or_else(|| VaultError::UnknownSecret(name.into()))?;
+    if secret.kind != Kind::ApiKey {
+        return Err(VaultError::WrongKind);
+    }
+    println!("Changing where API key {name:?} goes (host, port, methods and path stay as they are)");
+    if let Some(rule) = &secret.rule {
+        println!("  now: {rule}");
+    }
+    println!("  new: {}", placement.describe());
+    println!("  the value isn't shown, and goes to no other host, method or path than before");
+    let typed = read_hidden("Paste the recovery key from the kit (AGE-SECRET-KEY-1...), hidden: ")?;
+    let reply = client::set_rule(paths, &SecretRef::Name(name.into()), header.as_deref(), query.as_deref(), &typed)?;
+    drop(typed);
+    println!("Rule changed; {:?} is now version {}.", reply.secret.name, reply.secret.version);
+    println!("  was: {}", reply.was);
+    if let Some(rule) = &reply.secret.rule {
+        println!("  now: {rule}");
+    }
+    print_backup(&reply.backup);
+    Ok(())
+}
+
 fn list(paths: &Paths) -> Result<(), VaultError> {
     let reply = client::list(paths)?;
     if reply.secrets.is_empty() {
@@ -667,6 +719,10 @@ fn list(paths: &Paths) -> Result<(), VaultError> {
         if let Some(app) = &secret.app {
             let lease = if secret.leasable == Some(true) { "leasable" } else { "not leasable" };
             fields = format!("  (app {app}, {lease})");
+        }
+        // API keys: the rule (host, methods, path, where the key goes); never the key.
+        if let Some(rule) = &secret.rule {
+            fields = format!("  ({rule})");
         }
         // Wallets: the address and the caps; never the key.
         if let Some(wallet) = &secret.wallet {

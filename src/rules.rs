@@ -4,7 +4,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::VaultError;
 
-/// The rule saved with an API key. It can't be edited; delete the key and add it again (R7).
+/// The rule saved with an API key. Its host, port, methods and path can't be edited; delete the
+/// key and add it again (R7). Where the key goes (its header, or its query parameter) can be
+/// changed with the recovery key (`vault rule`, #8940).
+///
+/// The key goes into one header (`header_name`, between `header_prefix` and `header_suffix`) or,
+/// when `query_param` is set, into one query parameter (the header fields are then empty).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProxyRule {
     /// One exact host name, lower-case. No wildcards, no IP addresses.
@@ -14,28 +19,91 @@ pub struct ProxyRule {
     pub methods: Vec<String>,
     /// Path prefix, matched on whole segments.
     pub path_prefix: String,
-    /// The one header the key goes into, lower-case.
+    /// The one header the key goes into, lower-case. Empty for a query rule.
     pub header_name: String,
     /// Text before and after the key in that header, e.g. "Bearer " and "".
     pub header_prefix: String,
     pub header_suffix: String,
+    /// The one query parameter the key goes into, as typed (case kept), e.g. `ApiKey` (#8940).
+    /// An older build reads a query rule as a header rule with no header name, and refuses to
+    /// use it (and format 10 stops it reading the vault at all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_param: Option<String>,
+}
+
+/// Where a rule puts the key, as typed: a header and its format (`Authorization: Bearer {key}`),
+/// or a query parameter's name (`ApiKey`).
+#[derive(Clone, Copy, Debug)]
+pub enum KeySpec<'a> {
+    Header(&'a str),
+    Query(&'a str),
+}
+
+/// Where a rule puts the key, checked: the fields of `ProxyRule` that say so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placement {
+    pub header_name: String,
+    pub header_prefix: String,
+    pub header_suffix: String,
+    pub query_param: Option<String>,
+}
+
+impl Placement {
+    /// As a person reads it: `key in header `x-api-key: {key}`` or `key in query parameter
+    /// `ApiKey={key}``.
+    pub fn describe(&self) -> String {
+        match &self.query_param {
+            Some(param) => format!("key in query parameter `{param}={{key}}`"),
+            None => format!("key in header `{}: {}{{key}}{}`", self.header_name, self.header_prefix, self.header_suffix),
+        }
+    }
 }
 
 impl ProxyRule {
-    /// The rule as a person reads it, e.g. `GET https://api.openai.com/v1/models*, key in
-    /// authorization: Bearer {key}`.
+    /// The rule as a person reads it, e.g. `GET https://api.openai.com/v1/models  (and below),
+    /// key in header `authorization: Bearer {key}``.
     pub fn describe(&self) -> String {
         let port = if self.port == 443 { String::new() } else { format!(":{}", self.port) };
         format!(
-            "{} https://{}{}{}  (and below), key in header `{}: {}{{key}}{}`",
+            "{} https://{}{}{}  (and below), {}",
             self.methods.join(","),
             self.host,
             port,
             self.path_prefix,
-            self.header_name,
-            self.header_prefix,
-            self.header_suffix
+            self.describe_placement()
         )
+    }
+
+    /// Where the key goes, as a person reads it: `key in header `x: {key}`` or `key in query
+    /// parameter `ApiKey=``.
+    pub fn describe_placement(&self) -> String {
+        self.placement().describe()
+    }
+
+    pub fn placement(&self) -> Placement {
+        Placement {
+            header_name: self.header_name.clone(),
+            header_prefix: self.header_prefix.clone(),
+            header_suffix: self.header_suffix.clone(),
+            query_param: self.query_param.clone(),
+        }
+    }
+
+    /// The rule with the key put somewhere else; host, port, methods and path unchanged.
+    pub fn with_placement(&self, placement: Placement) -> ProxyRule {
+        ProxyRule {
+            header_name: placement.header_name,
+            header_prefix: placement.header_prefix,
+            header_suffix: placement.header_suffix,
+            query_param: placement.query_param,
+            ..self.clone()
+        }
+    }
+
+    /// The headers the vault sets for this rule, which a caller may not send: the key's header,
+    /// or none for a query rule.
+    fn set_headers(&self) -> Vec<&str> {
+        if self.query_param.is_some() || self.header_name.is_empty() { Vec::new() } else { vec![self.header_name.as_str()] }
     }
 }
 
@@ -85,7 +153,7 @@ pub fn parse_rule(
     port: Option<u16>,
     methods: &[String],
     path_prefix: &str,
-    header_spec: &str,
+    key: KeySpec<'_>,
 ) -> Result<ProxyRule, VaultError> {
     let host = validate_host(host)?;
     let port = port.unwrap_or(443);
@@ -118,6 +186,32 @@ pub fn parse_rule(
     })?;
     let path_prefix = if path_prefix.len() > 1 { path_prefix.trim_end_matches('/') } else { path_prefix };
 
+    let placement = parse_placement(key)?;
+    Ok(ProxyRule {
+        host,
+        port,
+        methods: checked,
+        path_prefix: path_prefix.to_string(),
+        header_name: placement.header_name,
+        header_prefix: placement.header_prefix,
+        header_suffix: placement.header_suffix,
+        query_param: placement.query_param,
+    })
+}
+
+/// Checks where a rule puts the key: one header and its format, or one query parameter.
+pub fn parse_placement(key: KeySpec<'_>) -> Result<Placement, VaultError> {
+    let header_spec = match key {
+        KeySpec::Query(param) => {
+            return Ok(Placement {
+                header_name: String::new(),
+                header_prefix: String::new(),
+                header_suffix: String::new(),
+                query_param: Some(validate_query_param(param)?),
+            });
+        }
+        KeySpec::Header(spec) => spec,
+    };
     let (name, format) = header_spec
         .split_once(':')
         .ok_or_else(|| VaultError::InvalidRule("the header looks like `Authorization: Bearer {key}`".into()))?;
@@ -136,15 +230,29 @@ pub fn parse_rule(
     if !(prefix.chars().chain(suffix.chars())).all(|c| c.is_ascii() && !c.is_ascii_control()) {
         return Err(VaultError::InvalidRule("the header format must be plain ASCII".into()));
     }
-    Ok(ProxyRule {
-        host,
-        port,
-        methods: checked,
-        path_prefix: path_prefix.to_string(),
+    Ok(Placement {
         header_name,
         header_prefix: prefix.to_string(),
         header_suffix: suffix.to_string(),
+        query_param: None,
     })
+}
+
+/// A query parameter's name for the key: letters, digits, `_`, `-` and `.`, at most 64, at least
+/// one letter or digit (so it has a normalized form to refuse a caller's copy by). Kept as typed:
+/// a server may read `ApiKey` and not `apikey`.
+pub fn validate_query_param(param: &str) -> Result<String, VaultError> {
+    let param = param.trim();
+    let ok = !param.is_empty()
+        && param.len() <= 64
+        && param.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        && param.bytes().any(|b| b.is_ascii_alphanumeric());
+    if !ok {
+        return Err(VaultError::InvalidRule(format!(
+            "{param:?} isn't a query parameter name the vault takes (letters, digits, _ - . only, like ApiKey)"
+        )));
+    }
+    Ok(param.to_string())
 }
 
 /// One exact DNS host name: lower-case labels, at least one dot, no IP addresses (R7).
@@ -296,15 +404,58 @@ pub fn normalized_param_name(name: &str) -> String {
 /// from the query, the way it reads a refused header (security audit run 1, lead 3). Parameters
 /// are split on `&` and `;`. The refusal names the parameter, never its value.
 pub fn check_query_params(query: Option<&str>, refused: &[&str], whose: &str) -> Result<(), VaultError> {
-    let Some(query) = query else { return Ok(()) };
-    for param in query.split(['&', ';']) {
-        let name = param.split_once('=').map_or(param, |(name, _)| name);
-        let normalized = normalized_param_name(name);
-        if refused.contains(&normalized.as_str()) {
-            return Err(VaultError::RuleMismatch(format!(
-                "query parameter {normalized:?} isn't allowed for {whose}: it names another credential or billed project"
-            )));
-        }
+    match query.and_then(|query| first_named(query, refused)) {
+        Some(normalized) => Err(VaultError::RuleMismatch(format!(
+            "query parameter {normalized:?} isn't allowed for {whose}: it names another credential or billed project"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The first parameter of `text` (a query or a form body, split on `&` and `;`) whose normalized
+/// name is in `refused`, normalized.
+fn first_named(text: &str, refused: &[&str]) -> Option<String> {
+    text.split(['&', ';'])
+        .map(|param| normalized_param_name(param.split_once('=').map_or(param, |(name, _)| name)))
+        .find(|normalized| refused.contains(&normalized.as_str()))
+}
+
+/// For a query rule (#8940): refuses a request that already names the key's parameter, in any
+/// spelling or encoding (`normalized_param_name`), in its query or its body read as form fields
+/// (a server such as Namecheap's reads a POST's form fields as it reads the query), and a
+/// multipart form body, whose field names this doesn't read. The vault adds the parameter
+/// itself; a caller's copy could take its place on a server that reads the first or the last.
+/// Refusals name the parameter, never a value.
+/// For a header rule, nothing to check.
+pub fn check_key_param(
+    rule: &ProxyRule,
+    query: Option<&str>,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<(), VaultError> {
+    let Some(param) = &rule.query_param else { return Ok(()) };
+    let normalized = normalized_param_name(param);
+    let refused = [normalized.as_str()];
+    let taken = |place: &str| {
+        VaultError::RuleMismatch(format!(
+            "{place} names {normalized:?}, the key's own parameter (in some spelling); the vault adds it"
+        ))
+    };
+    if query.is_some_and(|query| first_named(query, &refused).is_some()) {
+        return Err(taken("the query"));
+    }
+    let multipart = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type") && value.trim_start().to_ascii_lowercase().starts_with("multipart/")
+    });
+    if multipart {
+        return Err(VaultError::RuleMismatch(
+            "a multipart body isn't allowed with a key that goes in the query; send form fields url-encoded".into(),
+        ));
+    }
+    // Whatever its content type says (a server may not look), and lossily: a server may read
+    // a form in another character set.
+    if first_named(&String::from_utf8_lossy(body), &refused).is_some() {
+        return Err(taken("the body, read as form fields,"));
     }
     Ok(())
 }
@@ -361,7 +512,7 @@ pub fn check_agent_headers(
     rule: &ProxyRule,
     headers: &[(String, String)],
 ) -> Result<Vec<(String, String)>, VaultError> {
-    check_caller_headers(&[rule.header_name.as_str()], &[], headers)
+    check_caller_headers(&rule.set_headers(), &[], headers)
 }
 
 /// Checks a caller's headers for a request the vault sends with a credential (R9, R39): valid

@@ -16,7 +16,7 @@ use crate::keyprotect;
 use crate::kinds::{self, Renewed};
 use crate::model::{self, BackupStatus, Handover, Kind, Record, SecretRef, SecretSummary, VAULT_FORMAT, VaultDoc};
 use crate::protocol::{BackupCheck, OpenedStatus};
-use crate::rules::ProxyRule;
+use crate::rules::{Placement, ProxyRule};
 use crate::secret::SecretValue;
 use crate::store::{self, Paths};
 use crate::totp::{self, TotpCode};
@@ -1110,6 +1110,46 @@ impl Vault {
         event.detail = Some(format!("renamed to {new_name:?}, version {}", summary.version));
         let status = self.commit(event)?;
         Ok((summary, status))
+    }
+
+    /// Changes where an API key goes (#8940): its header, or its query parameter. Its host, port,
+    /// methods and path stay, and so do its id and value; its version goes up by one. Needs the
+    /// recovery key: an agent that could choose where the key goes could put it in a field an
+    /// endpoint under the rule stores or shows. Returns the placement it had, as `describe` says.
+    pub fn set_rule(
+        &mut self,
+        secret: &SecretRef,
+        placement: Placement,
+        recovery_key: SecretValue,
+    ) -> Result<(SecretSummary, String, BackupStatus), VaultError> {
+        self.reload()?;
+        self.ready_for_change()?;
+        let label = self.doc.find_ref(secret).map(|record| record.name.clone()).unwrap_or_else(|| secret.label());
+        self.check_recovery_key(recovery_key, "set-rule", &label)?;
+        let record = match secret {
+            SecretRef::Name(name) => self.doc.records.iter_mut().find(|record| &record.name == name),
+            SecretRef::Id(id) => self.doc.records.iter_mut().find(|record| &record.id == id),
+        }
+        .ok_or_else(|| secret.not_found())?;
+        if record.kind != Kind::ApiKey {
+            return Err(VaultError::WrongKind);
+        }
+        let rule = record.rule.as_ref().ok_or_else(|| VaultError::InvalidRule("this key has no rule".into()))?;
+        if rule.placement() == placement {
+            return Err(VaultError::InvalidRule(format!("the key already goes there ({})", rule.describe_placement())));
+        }
+        let was = rule.describe_placement();
+        let changed = rule.with_placement(placement);
+        let now_placed = changed.describe_placement();
+        record.rule = Some(changed);
+        record.version += 1;
+        record.updated_at = Some(crate::now_rfc3339());
+        let summary = record.summary();
+        let mut event = AuditEvent::named("set-rule", &summary.name, "ok");
+        event.secret_id = Some(summary.id.clone());
+        event.detail = Some(format!("{was}; now {now_placed}; version {}", summary.version));
+        let status = self.commit(event)?;
+        Ok((summary, was, status))
     }
 
     /// Decrypts the newest local backup with the check key and compares it with the vault (R19).
