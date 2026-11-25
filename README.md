@@ -118,18 +118,19 @@ Or restore a backup: `vault install --for-restore`, then `vault restore FILE`.
 
 - **Every secret has an id**: 32 random hex digits, given when it is added. It never changes:
   `vault rename` keeps it, and restores keep it. Each secret also has a `version` (1 when
-  added, plus one for each change, a rename today) and an `updated_at`.
+  added, plus one for each change: a rename, a new caps or a new place for an API key) and an
+  `updated_at`.
 - **The vault has a stable identity**: the first 128 bits of the SHA-256 of its recovery public
   key, shown by `vault status`. It survives restores and moves to another machine, because the
   recovery key does, and never names a machine. Its first 12 digits are the recovery-key
   fingerprint on the kit. The `vault_id` is the copy: new at every restore, and the prefix of
   the backup files' names.
-- **The vault file and backups are format 9** (format 2 plus the `claude_plan` kind and the
+- **The vault file and backups are format 10** (format 2 plus the `claude_plan` kind and the
   intake key in format 3, the `codex_login` and `grok_login` kinds and a login's handover
   state in format 4, the `personal_details` kind in format 5, the `app_secret` kind with its
   application and lease flag in format 6, the `wallet` kind with its chain, address, caps and
-  last day's payments in format 7, Solana and Tron wallets in format 8, and the `google_ai_login`
-  kind in format 9). An older vault file is migrated at the daemon's first start, as a change of
+  last day's payments in format 7, Solana and Tron wallets in format 8, the `google_ai_login`
+  kind in format 9, and API keys that go in a query parameter in format 10). An older vault file is migrated at the daemon's first start, as a change of
   its own (audited and backed up): a format-1 file's secrets get their ids, and a format-2 file
   gets its intake key. Older backups restore too. An older build refuses a newer file or backup
   as newer (`newer_format`); don't go back to an older build after upgrading.
@@ -141,7 +142,9 @@ The `vault` tool can't print a secret, so it is safe for any agent on the machin
 | Command | What it does |
 |---|---|
 | `vault install [--for-restore] [--json]` | Installs or updates the vault for your user. `--json`: one JSON object instead of prose, for a program ([docs/json.md](docs/json.md)). |
-| `vault add NAME --kind api-key --host HOST --method GET --path /v1 --header "Authorization: Bearer {key}"` | Adds an API key with its rule. The value is read at a hidden prompt, or from standard input with `--yes`. |
+| `vault add NAME --kind api-key --host HOST --method GET --path /v1 --header "Authorization: Bearer {key}"` | Adds an API key with its rule. The value is read at a hidden prompt, or from standard input with `--yes`. The rule is one host (port 443 unless `--port`), its methods, a path prefix, and where the key goes: one header (`--header`, the default `Authorization: Bearer {key}`), or one query parameter instead (`--query ApiKey`, below). |
+| `vault add NAME --kind api-key --host api.namecheap.com --method GET,POST --path /xml.response --query ApiKey` | An API key that goes in the URL's query, for an API that reads it there (Namecheap). The vault puts `ApiKey=<the key, percent-encoded>` first in the query, before the caller's own parameters. `--query` and `--header` can't both be given. |
+| `vault rule NAME --query ApiKey` or `vault rule NAME --header "X-Api-Key: {key}"` | Changes where a stored API key goes, another header or a query parameter; nothing else in its rule (host, port, methods and path stay: delete and add the key again to change those). The value never leaves the vault, and no one types it. Asks for the recovery key, since whoever chooses where the key goes could put it in a field an endpoint stores. Version up, audited (`set-rule`) and backed up. |
 | `vault add NAME --kind login --site SITE --username USER` | Adds a login. The in-app browser fills it into a page on that site; see "Logins in the browser" below. |
 | `vault add NAME --kind 2fa --site SITE` | Adds a 2FA seed: base32, or an `otpauth://` link. |
 | `vault add NAME --kind claude_plan` | Adds a Claude plan's token (from `claude setup-token`). Used only by `stream`, only to `api.anthropic.com`. The host's daemon normally stores plans itself (`import_plan`, `add_sealed`). |
@@ -152,7 +155,7 @@ The `vault` tool can't print a secret, so it is safe for any agent on the machin
 | `vault wallet caps NAME [--per-payment USD] [--daily USD] [fee caps]` | Changes a wallet's caps (the ones you leave out stay). Asks for the recovery key. |
 | `vault delete NAME` | Deletes a secret. Earlier backups keep it. A wallet isn't deleted: its key is the only way to its funds. |
 | `vault rename NAME NEW` | Renames a secret; its id, rule and value stay, its version goes up. |
-| `vault list` | Ids, names, kinds, versions and sites; for personal details, which fields are filled; for app secrets, the application and whether builds may lease it; for wallets, the address, the caps and what the last 24 hours spent. |
+| `vault list` | Ids, names, kinds, versions and sites; for API keys, the rule (where the key goes, never the key); for personal details, which fields are filled; for app secrets, the application and whether builds may lease it; for wallets, the address, the caps and what the last 24 hours spent. |
 | `vault health` | For each Claude plan and Codex, Grok or Google AI login, by name: whether it works, has expired or was refused (sign in again), and who renews it. |
 | `vault status [--json]` | The program, the daemon, backups and the audit chain. `--json`: one JSON object for a program, with a `problems` list and the command for each ([docs/json.md](docs/json.md)); no secret names. |
 | `vault --version` | The version, the commit it was built from and the target. |
@@ -180,14 +183,16 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   printable ASCII characters, or a whole number). Every reply, errors included, carries
   `"protocol": 2` and echoes the `request_id` as sent. A request without `protocol` is protocol 1
   and is served the same way. A newer protocol is refused with `unsupported_protocol`.
-- **Naming a secret:** `totp`, `proxy`, `delete` and `rename` take `"name"` or `"id"`, one of them.
-- `list` returns `{"ok":true,"secrets":[{"id","name","kind","site","version"}]}`; a
-  `personal_details` secret also has `"fields":["name","address",...]`, the filled ones, and an
+- **Naming a secret:** `totp`, `proxy`, `delete`, `rename` and `set_rule` take `"name"` or `"id"`, one of them.
+- `list` returns `{"ok":true,"secrets":[{"id","name","kind","site","version"}]}`; an `api-key`
+  also has `"rule"`, its rule as `vault list` shows it (methods, host, path, and the header or
+  query parameter the key goes in; never the key); a `personal_details` secret also has `"fields":["name","address",...]`, the filled ones, and an
   `app_secret` has `"app"` and `"leasable"`.
 - `totp` returns `{"ok":true,"id":"...","name":"github-2fa","code":"123456","seconds_left":17}`.
 - `proxy` takes `method`, `path` (with query), optional `headers` (an object) and `body` or
   `body_base64`. It returns `{"ok":true,"status":200,"headers":[[name,value]],"body":"..."}`.
-  The key goes only into the header its rule names, only to the rule's host, method and path.
+  The key goes only into the header its rule names, or the query parameter, only to the rule's
+  host, method and path.
   You may also name the destination you meant, `host` and `port` (443 if left out): when it
   isn't the key's rule's (the host compared case-insensitively), the call is refused
   `rule_mismatch` before anything is sent, and the refusal is audited. Without them, the call
@@ -195,6 +200,17 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   `{"op":"proxy","name":"openai","host":"api.openai.com","port":443,"method":"GET","path":"/v1/models"}`.
   Redirects come back to you unfollowed. A reply that contains the key is withheld
   (`echo_blocked`).
+- **An API key that goes in the query** (`--query ApiKey`): send your own parameters in `path`
+  and leave the key's out; the vault adds it first,
+  `?ApiKey=<key>&ApiUser=x&UserName=x&ClientIp=1.2.3.4&Command=namecheap.domains.getList` for
+  `{"op":"proxy","name":"namecheap","method":"GET","path":"/xml.response?ApiUser=x&UserName=x&ClientIp=1.2.3.4&Command=namecheap.domains.getList"}`.
+  A POST's form body works the same way (`"body":"ApiUser=x&...&Command=..."` with
+  `content-type: application/x-www-form-urlencoded`; the key stays in the query). Refused
+  `rule_mismatch` before anything is sent: a query, or a body read as form fields, that names
+  the key's parameter in any spelling or encoding (`ApiKey`, `apikey`, `api_key`, `Api%4Bey`,
+  `ApiKey[]`, a bare `ApiKey`), and a `multipart/` body. The query, with the key in it, is never
+  audited or logged: the audit line has the path only, as for every call. `stream` does the same
+  for such a key.
 - **What `proxy` and `stream` refuse** before anything is sent, so an upstream can't be steered
   outside the method, path and host the rule (or kind) allows: method, URL and host override
   headers (`x-http-method-override`, `x-http-method`, `x-method-override`, `x-original-url`,
@@ -258,7 +274,9 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   `vault status --json`, `intake`), so Volgenic's server could carry it without reading it:
   `{"op":"add_sealed","name":"main","kind":"claude_plan","sealed_base64":"<base64 of an age file>","replace":true}`.
   What is sealed is `{"v":1,"name","kind","site"?,"rule"?,"username"?,"value"}`; `name` and `kind`
-  must match the request's, and the rule is read only from inside it. `replace` replaces a stored
+  must match the request's, and the rule is read only from inside it. An API key's `rule` is
+  `{"host","port"?,"methods":[...],"path","header":"Authorization: Bearer {key}"}`, or with
+  `"query":"ApiKey"` in place of `header` for a key that goes in the query; exactly one of the two. `replace` replaces a stored
   secret of that name and kind (same id, version up), for a `claude_plan`, `codex_login`,
   `grok_login` or `google_ai_login` only, whose hosts the vault fixes; a sealed login's `value` is
   its `auth.json` (a Google AI login's, agy's token file), whole, and it is the vault's alone to renew from the start (a new sign-in); a sealed API key can only be added under a new name, never replace a stored one
@@ -287,6 +305,11 @@ echo '{"op":"proxy","name":"openai","method":"GET","path":"/v1/models"}' | nc -U
   returns each login's `result` by name (`done`, `unchanged` or `failed` with `error`), its
   `version` and whether it is `claimed`; `{"op":"claim_refresh","name":"codex","version":1}`
   returns `{"ok":true,"secret":{...},"claimed":true,"already":false}`.
+- **`set_rule`** is `vault rule` on the socket, and like it needs the recovery key:
+  `{"op":"set_rule","name":"namecheap","query":"ApiKey","recovery_key":"AGE-SECRET-KEY-1..."}`
+  (or `"header":"X-Api-Key: {key}"` in place of `query`; exactly one). It changes only where the
+  key goes, and answers `{"ok":true,"secret":{...,"rule":"<the new rule>"},"was":"key in header
+  ...","backup":{...}}`. A wrong recovery key is `wrong_recovery_key`, and is audited.
 - The other requests (`status`, `audit`, `add`, `delete`, `rename`, `confirm-kit`, `reset`, `restore`,
   `backup`, `verify-backup`, `read-backup`, `mirror-plan`, `mirror-report`) are what the
   command-line tool and the mirror send; `src/protocol.rs` lists them.

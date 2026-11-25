@@ -1,6 +1,6 @@
 [package]
 name = "vault"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0"
@@ -66,7 +66,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # cli-chat-proxy.grok.com, auth.x.ai, the Google AI login's Cloud Code hosts and oauth2.googleapis.com)
 # to 127.0.0.1 at VAULT_TEST_UPSTREAM_PORT
 # and also trusts the CA in VAULT_TEST_CA, so a streamed reply can be shown from a local test
-# server with the real TLS path. The daemon logs a warning at start when it is on.
+# server with the real TLS path. With VAULT_TEST_API_HOST, `proxy` sends that one API key host to
+# 127.0.0.1 too (at the rule's port). The daemon logs a warning at start when it is on.
 test-upstream = []
 
 [profile.dev]

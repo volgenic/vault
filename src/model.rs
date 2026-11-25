@@ -124,6 +124,10 @@ pub struct SecretSummary {
     /// its key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallet: Option<WalletSummary>,
+    /// An API key only: its rule as a person reads it (`ProxyRule::describe`): where the key
+    /// may go, and whether in a header or a query parameter. Never the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
 }
 
 /// What a listing shows of a wallet.
@@ -223,6 +227,7 @@ impl Record {
             fields: self.fields.clone(),
             app: self.app.clone(),
             leasable: if self.kind == Kind::AppSecret { Some(self.leasable == Some(true)) } else { None },
+            rule: self.rule.as_ref().map(ProxyRule::describe),
             wallet: self.wallet.as_ref().map(|info| {
                 let now = crate::now_unix();
                 let (spent, fees) = info.spent(now);
@@ -307,10 +312,13 @@ pub(crate) struct VaultDoc {
 /// - **8**: Solana and Tron wallets, with their own fee caps, and a spend's `fee` (was `fee_wei`)
 ///   and `identity` (#7490).
 /// - **9**: the `google_ai_login` kind (#8147).
-pub(crate) const VAULT_FORMAT: u32 = 9;
+/// - **10**: an API key's rule may put the key in a query parameter, `query_param` (#8940). An
+///   older build would read such a rule as one with an empty header name, so the format number
+///   tells it this file is newer instead.
+pub(crate) const VAULT_FORMAT: u32 = 10;
 
 /// Every format this build reads. Older ones are migrated to `VAULT_FORMAT` when read.
-pub(crate) const READABLE_FORMATS: [u32; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+pub(crate) const READABLE_FORMATS: [u32; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 /// A secret as a request names it: by its name, or by its stable id.
 #[derive(Clone, Debug, PartialEq, Eq)]

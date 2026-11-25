@@ -33,7 +33,7 @@ use crate::platform::{self, Peer};
 use crate::protocol::{
     self, AddReply, AddSealedReply, AuditReply, BackupReply, ClaimReply, ConfirmKitReply, Envelope, ErrorReply, Framed,
     HealthReply, ImportLoginReply, ImportReply, ImportedLogin, ImportedPlan, ListReply, MirrorPlanReply, OkReply,
-    CancelReply, LeaseReply, LeasedSecret, ProxyReplyOut, ReadBackupReply, RenameReply, Request, ResetReply, RestoreReply, SignReply,
+    CancelReply, LeaseReply, LeasedSecret, ProxyReplyOut, ReadBackupReply, RenameReply, Request, SetRuleReply, ResetReply, RestoreReply, SignReply,
     SignedTx, StatusReply, TotpReply, VerifyBackupReply, WalletReply,
 };
 use crate::proxy::{self, ProxyRequest};
@@ -532,13 +532,7 @@ impl Server {
                     let sealed = intake::open(identity, &sealed_base64, &name, kind)?;
                     drop(doc);
                     let rule = match (kind, &sealed.rule) {
-                        (Kind::ApiKey, Some(input)) => Some(rules::parse_rule(
-                            &input.host,
-                            input.port,
-                            &input.methods,
-                            &input.path,
-                            &input.header,
-                        )?),
+                        (Kind::ApiKey, Some(input)) => Some(input.parse()?),
                         (Kind::ApiKey, None) => return Err(VaultError::InvalidRule("an API key needs a rule".into())),
                         _ => None,
                     };
@@ -713,13 +707,7 @@ impl Server {
             Request::Add { name, kind, site, rule, username, app, leasable, value } => {
                 let result = (|| {
                     let rule = match (kind, rule) {
-                        (Kind::ApiKey, Some(input)) => Some(rules::parse_rule(
-                            &input.host,
-                            input.port,
-                            &input.methods,
-                            &input.path,
-                            &input.header,
-                        )?),
+                        (Kind::ApiKey, Some(input)) => Some(input.parse()?),
                         (Kind::ApiKey, None) => return Err(VaultError::InvalidRule("an API key needs a rule".into())),
                         _ => None,
                     };
@@ -738,6 +726,13 @@ impl Server {
                     .with_vault(|vault| vault.rename(&secret, &new_name))
                     .map(|(secret, backup)| RenameReply { ok: true, secret, backup });
                 self.finish(stream, peer, "rename", Some(&secret.label()), result)
+            }
+            Request::SetRule { secret, header, query, recovery_key } => {
+                let result = crate::protocol::key_spec(header.as_deref(), query.as_deref())
+                    .and_then(rules::parse_placement)
+                    .and_then(|placement| self.with_vault(|vault| vault.set_rule(&secret, placement, recovery_key)))
+                    .map(|(secret, was, backup)| SetRuleReply { ok: true, secret, was, backup });
+                self.finish(stream, peer, "set-rule", Some(&secret.label()), result)
             }
             Request::ConfirmKit { recovery_key } => {
                 let result = self
@@ -1156,7 +1151,7 @@ impl Server {
             return refuse(call.secret.not_found(), event, out);
         };
         let id = record.id.clone();
-        let plan = match stream::plan(record, call.host.as_deref(), &call.method, &call.path, &call.headers) {
+        let plan = match stream::plan(record, call.host.as_deref(), &call.method, &call.path, &call.headers, &call.body) {
             Ok(plan) => plan,
             Err(error) => return refuse(error, event, out),
         };

@@ -57,6 +57,9 @@ pub struct UpstreamPlan {
     pub port: u16,
     pub method: String,
     pub path_and_query: String,
+    /// An API key whose rule puts it in the query (#8940): the parameter, which goes first in the
+    /// query when the request is built (`proxy::url_with_key`). The plan itself never holds the key.
+    pub query_param: Option<String>,
     /// The caller's headers, checked (R9).
     pub headers: Vec<(String, String)>,
     /// The headers that carry the credential: name, text before it, text after it, and which of
@@ -75,6 +78,7 @@ pub(crate) fn plan(
     method: &str,
     path: &str,
     headers: &[(String, String)],
+    body: &[u8],
 ) -> Result<UpstreamPlan, VaultError> {
     let (path_only, query) = rules::check_path_and_query(path)?;
     let path_and_query = match &query {
@@ -88,13 +92,20 @@ pub(crate) fn plan(
             return Err(VaultError::RuleMismatch("the host isn't the key's rule's host".into()));
         }
         rules::check_against_rule(rule, &method, &path_only)?;
+        let headers = rules::check_agent_headers(rule, headers)?;
+        rules::check_key_param(rule, query.as_deref(), &headers, body)?;
+        let set = match &rule.query_param {
+            Some(_) => Vec::new(),
+            None => vec![(rule.header_name.clone(), rule.header_prefix.clone(), rule.header_suffix.clone(), HeaderSource::Token)],
+        };
         return Ok(UpstreamPlan {
             host: rule.host.clone(),
             port: rule.port,
             method,
             path_and_query,
-            headers: rules::check_agent_headers(rule, headers)?,
-            set: vec![(rule.header_name.clone(), rule.header_prefix.clone(), rule.header_suffix.clone(), HeaderSource::Token)],
+            query_param: rule.query_param.clone(),
+            headers,
+            set,
             classify: None,
             reason: None,
         });
@@ -128,6 +139,7 @@ pub(crate) fn plan(
         port: 443,
         method,
         path_and_query,
+        query_param: None,
         headers,
         set,
         classify: Some(spec.classify),
@@ -437,8 +449,16 @@ impl Streamer {
     fn request(&self, plan: &UpstreamPlan, credential: &Credential<'_>, body: &[u8]) -> Result<reqwest::Request, VaultError> {
         let port = self.test_port.unwrap_or(plan.port);
         let port = if port == 443 { String::new() } else { format!(":{port}") };
-        let url = reqwest::Url::parse(&format!("https://{}{}{}", plan.host, port, plan.path_and_query))
-            .map_err(|_| VaultError::BadRequest("bad path".into()))?;
+        let origin = format!("https://{}{}", plan.host, port);
+        let (path, query) = match plan.path_and_query.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (plan.path_and_query.as_str(), None),
+        };
+        // The key in the query (#8940) only for a rule that puts it there; otherwise the URL is
+        // the caller's path and query as they are.
+        let text = crate::proxy::url_with_key(&origin, plan.query_param.as_deref(), credential.token.get(), path, query);
+        let url = reqwest::Url::parse(&text).map_err(|_| VaultError::BadRequest("bad path".into()))?;
+        drop(text);
         if url.host_str() != Some(plan.host.as_str()) || url.scheme() != "https" {
             return Err(VaultError::RuleMismatch("the request's host isn't the allowed host".into()));
         }
@@ -530,10 +550,19 @@ fn test_upstream(builder: reqwest::ClientBuilder) -> (reqwest::ClientBuilder, Op
 /// system's roots, so a local test server can stand in for api.anthropic.com over real TLS.
 #[cfg(feature = "test-upstream")]
 fn test_upstream(builder: reqwest::ClientBuilder) -> (reqwest::ClientBuilder, Option<u16>) {
+    let mut builder = builder;
+    // `VAULT_TEST_API_HOST`: one API key host, sent to 127.0.0.1 at its rule's port, as `proxy` does.
+    if let Ok(host) = std::env::var("VAULT_TEST_API_HOST") {
+        builder = builder.resolve(&host, std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+        if let Some(pem) = std::env::var("VAULT_TEST_CA").ok().and_then(|path| std::fs::read(path).ok()) {
+            if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+    }
     let Some(port) = std::env::var("VAULT_TEST_UPSTREAM_PORT").ok().and_then(|p| p.parse::<u16>().ok()) else {
         return (builder, None);
     };
-    let mut builder = builder;
     for spec in kinds::TABLE {
         for host in spec.hosts.iter().chain(spec.refresher.as_ref().map(|refresher| &refresher.host)) {
             builder = builder.resolve(host, std::net::SocketAddr::from(([127, 0, 0, 1], port)));
