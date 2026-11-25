@@ -45,6 +45,7 @@ pub fn client() -> Result<Client, VaultError> {
     let builder = builder.use_native_tls(); // R11: Security.framework, macOS's trust store
     #[cfg(target_os = "linux")]
     let builder = builder.use_rustls_tls(); // R11: rustls with the system's root certificates
+    let builder = test_api_host(builder);
     builder
         .timeout(TIMEOUT)
         .connect_timeout(Duration::from_secs(10))
@@ -200,6 +201,27 @@ fn build_header(rule: &ProxyRule, key: &SecretValue) -> Result<HeaderValue, Vaul
         .map_err(|_| VaultError::InvalidSecret("the key can't go into an HTTP header".into()))?;
     header.set_sensitive(true);
     Ok(header)
+}
+
+#[cfg(not(feature = "test-upstream"))]
+fn test_api_host(builder: reqwest::blocking::ClientBuilder) -> reqwest::blocking::ClientBuilder {
+    builder
+}
+
+/// `test-upstream` builds only (never a release): `VAULT_TEST_API_HOST` names one API key host
+/// that `proxy` sends to 127.0.0.1 (at the rule's port), and `VAULT_TEST_CA` (a PEM file) is
+/// trusted besides the system's roots, so a local server can stand in for an API over real TLS.
+#[cfg(feature = "test-upstream")]
+fn test_api_host(builder: reqwest::blocking::ClientBuilder) -> reqwest::blocking::ClientBuilder {
+    let Ok(host) = std::env::var("VAULT_TEST_API_HOST") else { return builder };
+    let mut builder = builder.resolve(&host, std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+    if let Some(pem) = std::env::var("VAULT_TEST_CA").ok().and_then(|path| std::fs::read(path).ok()) {
+        if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+    eprintln!("vault daemon: TEST BUILD: proxy calls to {host} go to 127.0.0.1");
+    builder
 }
 
 /// A short reason with no URL or header in it: the HTTP library's own messages include the URL,

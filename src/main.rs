@@ -692,6 +692,9 @@ fn set_rule(paths: &Paths, name: &str, header: Option<String>, query: Option<Str
         println!("  now: {rule}");
     }
     println!("  new: {}", placement.describe());
+    if secret.rule.as_ref().is_some_and(|rule| rule.ends_with(&placement.describe())) {
+        return Err(VaultError::InvalidRule("the key already goes there; nothing to change".into()));
+    }
     println!("  the value isn't shown, and goes to no other host, method or path than before");
     let typed = read_hidden("Paste the recovery key from the kit (AGE-SECRET-KEY-1...), hidden: ")?;
     let reply = client::set_rule(paths, &SecretRef::Name(name.into()), header.as_deref(), query.as_deref(), &typed)?;

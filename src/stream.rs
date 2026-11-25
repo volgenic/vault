@@ -550,10 +550,19 @@ fn test_upstream(builder: reqwest::ClientBuilder) -> (reqwest::ClientBuilder, Op
 /// system's roots, so a local test server can stand in for api.anthropic.com over real TLS.
 #[cfg(feature = "test-upstream")]
 fn test_upstream(builder: reqwest::ClientBuilder) -> (reqwest::ClientBuilder, Option<u16>) {
+    let mut builder = builder;
+    // `VAULT_TEST_API_HOST`: one API key host, sent to 127.0.0.1 at its rule's port, as `proxy` does.
+    if let Ok(host) = std::env::var("VAULT_TEST_API_HOST") {
+        builder = builder.resolve(&host, std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+        if let Some(pem) = std::env::var("VAULT_TEST_CA").ok().and_then(|path| std::fs::read(path).ok()) {
+            if let Ok(cert) = reqwest::Certificate::from_pem(&pem) {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+    }
     let Some(port) = std::env::var("VAULT_TEST_UPSTREAM_PORT").ok().and_then(|p| p.parse::<u16>().ok()) else {
         return (builder, None);
     };
-    let mut builder = builder;
     for spec in kinds::TABLE {
         for host in spec.hosts.iter().chain(spec.refresher.as_ref().map(|refresher| &refresher.host)) {
             builder = builder.resolve(host, std::net::SocketAddr::from(([127, 0, 0, 1], port)));
